@@ -35,7 +35,27 @@ div[data-testid="stElementToolbar"] button {display:none !important;}
 </style>
 """, unsafe_allow_html=True)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data_billar.db")
+# ======= Footer fijo: "@2025 creado por omar conde" =======
+st.markdown("""
+<style>
+.footer-omar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  padding: 6px 12px;
+  text-align: center;
+  font-size: 0.9rem;
+  color: #6b7280;              /* gris suave */
+  background: rgba(255,255,255,0.75);
+  backdrop-filter: saturate(180%) blur(6px);
+  border-top: 1px solid rgba(0,0,0,0.06);
+  z-index: 10000;              /* por encima del contenido */
+}
+</style>
+<div class="footer-omar">@2025 creado por omar conde</div>
+""", unsafe_allow_html=True)
+# ======= /Footer fijo =======
+
+DB_PATH = os.environ.get("BILLAR_DB_PATH") or os.path.join(os.path.dirname(__file__), "data_billar.db")
 CURRENCY = "$"  # solo UI
 
 # ---------------- DB ----------------
@@ -181,7 +201,7 @@ def verify_user(username: str, password: str) -> Tuple[bool, dict]:
         return False, {}
 
 def login_screen():
-    st.title("🔐 Acceso")
+    st.title("clubdebillaresv8")
     u = st.text_input("Usuario", value="")
     p = st.text_input("Contraseña", type="password", value="")
     if st.button("Entrar", use_container_width=True):
