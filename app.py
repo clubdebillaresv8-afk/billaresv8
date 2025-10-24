@@ -32,6 +32,11 @@ button[aria-label="Open the menu"] {display:none !important;}
 /* Refuerzo: oculta cualquier botón dentro del toolbar por si cambia el testid */
 div[data-testid="stElementToolbar"] button {display:none !important;}
 .small-note {font-size:.9rem; opacity:.7;}
+
+/* 🔒 Ocultar menú principal (3 puntos del header) */
+header [data-testid="baseButton-headerNoPadding"] {display:none !important;}
+div[data-testid="stToolbar"] {display:none !important;}
+#MainMenu {display:none !important;}
 </style>
 """, unsafe_allow_html=True)
 
