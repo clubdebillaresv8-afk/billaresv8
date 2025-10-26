@@ -1,5 +1,4 @@
-# Create the cleaned Streamlit app file with no data (ready to deploy)
-code = r'''# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 clubdebillaresV8 – POS simple con:
 - Login y gestión de usuarios
@@ -1202,8 +1201,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-'''
-with open('/mnt/data/app_clean.py', 'w', encoding='utf-8') as f:
-    f.write(code)
-
-'/mnt/data/app_clean.py'
