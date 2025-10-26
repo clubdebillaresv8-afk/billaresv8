@@ -5,7 +5,6 @@ clubdebillaresV8 – POS simple con:
 - Productos (alta + PDF de empresa; autocompletar por código)
 - Reposición + registro de facturas de compra (con PDF breve)
 - Ventas + recibo PDF (una sola fila con totales)
-- Informe de ventas + PDF
 - Inventario a fecha
 - Pie de página con créditos
 
@@ -48,6 +47,7 @@ st.set_page_config(page_title=APP_TITLE, page_icon=None, layout="wide")
 st.markdown(
     """
 <style>
+/* Ocultar toolbars y 3 puntos */
 div[data-testid="stElementToolbar"],
 div[data-testid="stDecoration"],
 header [data-testid="baseButton-headerNoPadding"],
@@ -327,6 +327,21 @@ def update_product_by_code(code: str, name: str, price: float, stock: int, cost:
             return False, f"No se pudo actualizar: {e}"
 
 
+def delete_product(product_id: int) -> Tuple[bool, str]:
+    """Elimina un producto si no tiene ventas ni facturas asociadas (evita orfandad)."""
+    try:
+        with get_conn() as conn:
+            s = conn.execute("SELECT COUNT(1) FROM sales WHERE product_id=?", (product_id,)).fetchone()[0]
+            i = conn.execute("SELECT COUNT(1) FROM invoices WHERE product_id=?", (product_id,)).fetchone()[0]
+            if (s or 0) > 0 or (i or 0) > 0:
+                return False, "No se puede eliminar: el producto tiene ventas o facturas registradas."
+            conn.execute("DELETE FROM products WHERE id=?", (product_id,))
+            conn.commit()
+        return True, "Producto eliminado."
+    except Exception as e:
+        return False, f"No se pudo eliminar el producto: {e}"
+
+
 def get_product_by_code(code: str) -> Optional[sqlite3.Row]:
     with get_conn() as conn:
         return conn.execute(
@@ -430,6 +445,7 @@ def restock_with_invoice(
 
 
 def register_sale(product_id: int, qty: int) -> Tuple[bool, str, float]:
+    """Registra una venta, descuenta stock y retorna el total de la venta."""
     if qty <= 0:
         return False, "La cantidad debe ser mayor a 0.", 0.0
 
@@ -442,18 +458,17 @@ def register_sale(product_id: int, qty: int) -> Tuple[bool, str, float]:
         if row["stock"] < qty:
             return False, f"Stock insuficiente. Disponible: {row['stock']}", 0.0
 
-    total = round(float(row["price"]) * int(qty), 2)
-    try:
-        with get_conn() as conn:
+        total = round(float(row["price"]) * int(qty), 2)
+
+        try:
             conn.execute("BEGIN")
             conn.execute("UPDATE products SET stock=stock-? WHERE id=?", (int(qty), product_id))
             conn.execute("INSERT INTO sales(product_id, qty, total) VALUES (?,?,?)", (product_id, int(qty), total))
             conn.commit()
-        return True, f"Venta registrada de {qty} x {row['name']}.", total
-    except Exception as e:
-        with get_conn() as conn:
+            return True, f"Venta registrada de {qty} x {row['name']}.", total
+        except Exception as e:
             conn.rollback()
-        return False, f"Error al registrar venta: {e}", 0.0
+            return False, f"Error al registrar venta: {e}", 0.0
 
 
 def sales_detail(start: dt.datetime, end: dt.datetime) -> List[sqlite3.Row]:
@@ -477,7 +492,7 @@ def sales_detail(start: dt.datetime, end: dt.datetime) -> List[sqlite3.Row]:
 
 
 # =============================================================================
-# PDFs
+# PDFs (ventas e ingresos de compra)
 # =============================================================================
 def build_sale_pdf(*, business_name: str, product: str, qty: int, total: float, when: dt.datetime):
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -524,9 +539,6 @@ def build_sale_pdf_like_screenshot(
     """
     Recibo de venta (UNA SOLA FILA):
     Producto | Unidades | Costo unit. | Precio venta | Valor | Ganancia
-
-    - Valor    = price_unit * qty
-    - Ganancia = (price_unit - cost_unit) * qty   (puede ser negativa)
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
@@ -539,7 +551,7 @@ def build_sale_pdf_like_screenshot(
     costo_u = float(cost_unit)
     precio_u = float(price_unit)
     valor = precio_u * unidades
-    ganancia = (precio_u - costo_u) * unidades  # << sin max(...)
+    ganancia = (precio_u - costo_u) * unidades
 
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
@@ -583,9 +595,7 @@ def build_sale_pdf_like_screenshot(
 def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float, iva_percent: float,
                             business_name: str = "", nit: str = ""):
     """
-    PDF exacto:
-    CÓDIGO | CANTIDAD | NOMBRE | IVA | VALOR UNITARIO | TOTAL DE LA FACTURA
-    Encabezado opcional: "EMPRESA – NIT X".
+    PDF de compra breve: CÓDIGO | CANTIDAD | NOMBRE | IVA | VALOR UNITARIO | TOTAL DE LA FACTURA
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
@@ -636,8 +646,7 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
 
 def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business_name: str = "", nit: str = ""):
     """
-    PDF multi-ítem por empresa:
-    Código | Unidades (stock) | Nombre | IVA | Valor unitario (costo) | Total por ítem + TOTAL general
+    PDF multi-ítem por empresa.
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
@@ -778,6 +787,7 @@ def page_sell() -> None:
 
 
 def page_products() -> None:
+    # Empresa + NIT para PDF
     st.session_state.setdefault("pdf_empresa", "")
     st.session_state.setdefault("pdf_nit", "")
 
@@ -787,11 +797,13 @@ def page_products() -> None:
     with cemp2:
         st.session_state["pdf_nit"] = st.text_input("NIT", value=st.session_state["pdf_nit"])
 
+    # Nonce para reset limpio del formulario
     st.session_state.setdefault("product_form_nonce", 0)
     nonce = st.session_state["product_form_nonce"]
 
     with st.expander("Agregar nuevo producto", expanded=True):
         base = f"new_{nonce}_"
+
         def _on_code_change():
             code_val = st.session_state.get(base + "code", "").strip()
             r = get_product_by_code(code_val) if code_val else None
@@ -806,17 +818,10 @@ def page_products() -> None:
         code = st.text_input("Código", placeholder="Ejemplo C-001",
                              key=base + "code", on_change=_on_code_change)
         name = st.text_input("Nombre", placeholder="Ej. Cerveza", key=base + "name")
-        company = st.text_input(
-            "Empresa/Proveedor (para agrupar)",
-            placeholder="Ej. empresa Provedor",
-            key=base + "company"
-        )
-        cost = st.number_input("Costo unitario (de factura)", min_value=0.0, step=100.0,
-                               format="%.2f", value=0.0, key=base + "cost")
-        price = st.number_input("Precio de venta", min_value=0.0, step=100.0,
-                                format="%.2f", key=base + "price")
-        iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0,
-                              value=0.0, key=base + "iva")
+        company = st.text_input("Empresa/Proveedor (para agrupar)", placeholder="Ej. Proveedor X", key=base + "company")
+        cost = st.number_input("Costo unitario (de factura)", min_value=0.0, step=100.0, format="%.2f", value=0.0, key=base + "cost")
+        price = st.number_input("Precio de venta", min_value=0.0, step=100.0, format="%.2f", key=base + "price")
+        iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0, key=base + "iva")
         stock = st.number_input("Unidades", min_value=0, step=1, value=0, key=base + "stock")
 
         col_save, col_pdf = st.columns([1, 1])
@@ -834,29 +839,23 @@ def page_products() -> None:
                 pdf_bytes = b""
                 if ready:
                     empresa_titulo = (company or st.session_state.get("pdf_empresa", ""))
-
                     if (company or "").strip():
                         rows = fetch_products_by_company(company)
                         if rows:
                             pdf_bytes, _ = build_company_invoice_pdf(
-                                rows=rows,
-                                company=company.strip(),
-                                business_name=empresa_titulo,
-                                nit=st.session_state.get("pdf_nit", ""),
+                                rows=rows, company=company.strip(),
+                                business_name=empresa_titulo, nit=st.session_state.get("pdf_nit", ""),
                             )
                         else:
                             pdf_bytes, _ = build_invoice_pdf_brief(
                                 code=code, qty=int(stock), name=name, unit_value=float(cost),
-                                iva_percent=float(iva), business_name=empresa_titulo,
-                                nit=st.session_state.get("pdf_nit", ""),
+                                iva_percent=float(iva), business_name=empresa_titulo, nit=st.session_state.get("pdf_nit", ""),
                             )
                     else:
                         pdf_bytes, _ = build_invoice_pdf_brief(
                             code=code, qty=int(stock), name=name, unit_value=float(cost),
-                            iva_percent=float(iva), business_name=empresa_titulo,
-                            nit=st.session_state.get("pdf_nit", ""),
+                            iva_percent=float(iva), business_name=empresa_titulo, nit=st.session_state.get("pdf_nit", ""),
                         )
-
                 st.download_button(
                     "Generar y descargar PDF",
                     data=pdf_bytes if ready else b"",
@@ -871,7 +870,7 @@ def page_products() -> None:
 
     st.divider()
 
-    # -------- PDF por EMPRESA ----------
+    # PDF por EMPRESA
     st.markdown("### Factura PDF por empresa")
     cc1, cc2 = st.columns([2, 1])
     with cc1:
@@ -881,14 +880,12 @@ def page_products() -> None:
         if reportlab_ok():
             st.session_state.setdefault("pdf_generado_empresa", False)
             gen_disabled = st.session_state["pdf_generado_empresa"] or not empresa_query.strip()
-
             if st.button("Generar PDF por empresa", use_container_width=True, disabled=gen_disabled):
                 rows = fetch_products_by_company(empresa_query.strip()) if empresa_query.strip() else []
                 if rows:
                     pdf_bytes, _ = build_company_invoice_pdf(
                         rows=rows, company=empresa_query.strip(),
-                        business_name=st.session_state.get("pdf_empresa", ""),
-                        nit=st.session_state.get("pdf_nit", "")
+                        business_name=st.session_state.get("pdf_empresa", ""), nit=st.session_state.get("pdf_nit", "")
                     )
                     st.download_button(
                         "Descargar PDF por empresa",
@@ -904,7 +901,7 @@ def page_products() -> None:
         else:
             st.warning("Para exportar a PDF instala: pip install reportlab")
 
-    # -------- Tabla de productos ----------
+    # Tabla de productos
     data = list_products_db()
     if data:
         st.dataframe(
@@ -926,7 +923,7 @@ def page_products() -> None:
     else:
         st.info("Aún no hay productos.")
 
-    # -------- Últimas facturas ----------
+    # Últimas facturas
     st.markdown("### Últimas facturas de compra")
     inv = list_invoices(limit=20)
     if inv:
@@ -957,11 +954,8 @@ def page_restock() -> None:
         st.info("No hay productos para reponer.")
         return
 
-    names = [
-        f"[{p['code'] or p['id']}] {p['name']}  (stock:{p['stock']}, "
-        f"costo:{money_dot_thousands(p['cost'])}, precio:{money_dot_thousands(p['price'])})"
-        for p in products
-    ]
+    # *** SOLO NOMBRE DEL PRODUCTO EN EL SELECTOR ***
+    names = [p["name"] for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
 
     def _reset_restock_fields():
@@ -1029,120 +1023,41 @@ def page_restock() -> None:
         else:
             st.info("Puedes indicar un nuevo precio y marcar la casilla para aplicarlo.")
 
-    if st.button("Reponer", use_container_width=True):
-        inv_val = float(invoice_total) if use_invoice else None
-        price_val = float(new_price) if apply_new_price else None
-        ok, msg = restock_with_invoice(products[idx]["id"], int(qty), inv_val, price_val)
-        if ok:
-            extra = []
-            if inv_val is not None and qty > 0:
-                extra.append(
-                    f"Factura: {CURRENCY}{money_dot_thousands(invoice_total)}  |  "
-                    f"Costo unit.: {CURRENCY}{money_dot_thousands(invoice_total/qty)}"
-                )
-            if price_val is not None:
-                extra.append(f"Nuevo precio: {CURRENCY}{money_dot_thousands(new_price)}")
-            detalle = " — " + " — ".join(extra) if extra else ""
-            st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}{detalle}")
+    # ---- Acciones ----
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Reponer", use_container_width=True):
+            inv_val = float(invoice_total) if use_invoice else None
+            price_val = float(new_price) if apply_new_price else None
+            ok, msg = restock_with_invoice(products[idx]["id"], int(qty), inv_val, price_val)
+            if ok:
+                extra = []
+                if inv_val is not None and qty > 0:
+                    extra.append(
+                        f"Factura: {CURRENCY}{money_dot_thousands(invoice_total)}  |  "
+                        f"Costo unit.: {CURRENCY}{money_dot_thousands(invoice_total/qty)}"
+                    )
+                if price_val is not None:
+                    extra.append(f"Nuevo precio: {CURRENCY}{money_dot_thousands(new_price)}")
+                detalle = " — " + " — ".join(extra) if extra else ""
+                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}{detalle}")
+                _reset_restock_fields()
+                st.rerun()
+            else:
+                st.error(msg)
 
-            _reset_restock_fields()
-            st.rerun()
-        else:
-            st.error(msg)
-
-
-def build_report_pdf_detailed(*, rows: List[sqlite3.Row]):
-    """
-    PDF de informe detallado de ventas (Producto | Unidades | Costo unit. | Precio | Valor | Ganancia)
-    """
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib import colors
-
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
-    styles = getSampleStyleSheet()
-
-    title = Paragraph("<b>Informe de ventas</b>", styles["Title"])
-
-    header = ["Producto", "Unidades", "Costo unit.", "Precio", "Valor", "Ganancia"]
-    data = [header]
-
-    total_valor = 0.0
-    total_ganancia = 0.0
-
-    for r in rows:
-        unidades = int(r["unidades"] or 0)
-        c = float(r["costo_unit"] or 0.0)
-        p = float(r["precio_unit"] or 0.0)
-        valor = float(r["ingreso"] or 0.0)
-        gan = (p - c) * unidades  # << sin max(...), puede ser negativa
-        total_valor += valor
-        total_ganancia += gan
-        data.append([str(r["name"]), f"{unidades}", money_dot_thousands(c), money_dot_thousands(p),
-                     money_dot_thousands(valor), money_dot_thousands(gan)])
-
-    data.append(["Totales", "", "", "", money_dot_thousands(total_valor), money_dot_thousands(total_ganancia)])
-
-    table = Table(data, colWidths=[220, 60, 80, 80, 90, 90])
-    table.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (1, 1), (-1, -2), "RIGHT"),
-                ("ALIGN", (0, 1), (0, -2), "LEFT"),
-                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-                ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
-            ]
-        )
-    )
-
-    doc.build([title, Spacer(1, 8), table])
-    pdf = buf.getvalue()
-    buf.close()
-    return pdf, None
-
-
-def page_report() -> None:
-    today = dt.date.today()
-    c1, c2 = st.columns(2)
-    with c1:
-        d1 = st.date_input("Desde", value=today)
-    with c2:
-        d2 = st.date_input("Hasta (incl.)", value=today)
-
-    start_dt = dt.datetime.combine(d1, dt.time.min)
-    end_dt = dt.datetime.combine(d2, dt.time.max)
-    rows = sales_detail(start_dt, end_dt + dt.timedelta(seconds=1))
-
-    if rows:
-        tabla = [
-            {
-                "Producto": r["name"],
-                "Unidades": int(r["unidades"] or 0),
-                "Costo unit.": money_dot_thousands(float(r["costo_unit"] or 0.0)),
-                "Precio": money_dot_thousands(float(r["precio_unit"] or 0.0)),
-                "Ganancia": money_dot_thousands(
-                    (float(r["precio_unit"] or 0.0) - float(r["costo_unit"] or 0.0)) * int(r["unidades"] or 0)
-                ),
-            }
-            for r in rows
-        ]
-        st.dataframe(tabla, hide_index=True, use_container_width=True)
-        if reportlab_ok():
-            pdf_bytes, _ = build_report_pdf_detailed(rows=rows)
-            st.download_button(
-                "Generar PDF ",
-                data=pdf_bytes,
-                file_name=f"informe_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-    else:
-        st.info("Sin ventas para el rango seleccionado.")
+    with col2:
+        with st.expander("Eliminar este producto (acción irreversible)"):
+            st.warning("Para evitar inconsistencias, solo se puede eliminar si **no tiene ventas ni facturas**.")
+            confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.")
+            type_ok = st.text_input("Escribe ELIMINAR para confirmar").strip().upper() == "ELIMINAR"
+            if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not (confirm and type_ok)):
+                ok, msg = delete_product(products[idx]["id"])
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
 
 def page_inventory() -> None:
@@ -1204,13 +1119,8 @@ def page_inventory() -> None:
                 "Nombre": p["name"],
                 "Empresa": p["company"] or "",
                 "Stock": cur_stock,
-                "Stock (a fecha)": stock_at_cut,
                 "Costo unit.": money_dot_thousands(float(p["cost"] or 0)),
-                "Costo total": money_dot_thousands(costo_total),
-                "Costo total (a fecha)": money_dot_thousands(costo_total_cut),
-                "Precio": money_dot_thousands(float(p["price"] or 0)),
-                "Valor potencial": money_dot_thousands(venta_total),
-                "Valor potencial (a fecha)": money_dot_thousands(venta_total_cut),
+                "Precio de venta": money_dot_thousands(float(p["price"] or 0)),
             }
         )
 
@@ -1224,10 +1134,7 @@ def page_inventory() -> None:
         f"Costo total: {CURRENCY}{money_dot_thousands(total_costo_cut)}  |  "
         f"Valor potencial: {CURRENCY}{money_dot_thousands(total_venta_cut)}"
     )
-    st.caption(
-        "Nota: el cálculo a fecha usa ventas y facturas posteriores. "
-        "Si repones sin registrar factura, ese movimiento no se puede reflejar aquí."
-    )
+    st.caption(" ")
 
 
 def page_users() -> None:
@@ -1289,7 +1196,8 @@ def main() -> None:
         st.session_state.pop("nav", None)
         st.session_state["page"] = "Vendedor"
 
-    options = ["Vender producto", "factura de compra", "Reponer", "Informe", "Inventario"]
+    # >>> Menú sin "Informe"
+    options = ["Vender producto", "factura de compra", "Reponer", "Inventario"]
     current_page = st.session_state.get("page", "Vender producto")
     default_nav_value = current_page if current_page in options else options[0]
     default_index = options.index(default_nav_value)
@@ -1308,8 +1216,6 @@ def main() -> None:
         page_products()
     elif page == "Reponer":
         page_restock()
-    elif page == "Informe":
-        page_report()
     elif page == "Inventario":
         page_inventory()
     elif page == "Usuarios":
