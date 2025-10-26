@@ -1,4 +1,5 @@
-# -*- coding: utf-8 -*-
+# Create the cleaned Streamlit app file with no data (ready to deploy)
+code = r'''# -*- coding: utf-8 -*-
 """
 clubdebillaresV8 – POS simple con:
 - Login y gestión de usuarios
@@ -471,26 +472,6 @@ def register_sale(product_id: int, qty: int) -> Tuple[bool, str, float]:
             return False, f"Error al registrar venta: {e}", 0.0
 
 
-def sales_detail(start: dt.datetime, end: dt.datetime) -> List[sqlite3.Row]:
-    with get_conn() as conn:
-        return conn.execute(
-            """
-            SELECT
-                p.name,
-                s.qty AS unidades,
-                s.total AS ingreso,
-                p.cost AS costo_unit,
-                p.price AS precio_unit,
-                s.sold_at
-            FROM sales s
-            JOIN products p ON p.id = s.product_id
-            WHERE s.sold_at >= ? AND s.sold_at < ?
-            ORDER BY s.sold_at ASC
-            """,
-            (start, end),
-        ).fetchall()
-
-
 # =============================================================================
 # PDFs (ventas e ingresos de compra)
 # =============================================================================
@@ -958,37 +939,30 @@ def page_restock() -> None:
     names = [p["name"] for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
 
-    def _reset_restock_fields():
-        st.session_state["restock_qty"] = 1
-        st.session_state["restock_invoice"] = 0.0
-        st.session_state["restock_use_invoice"] = False
-        st.session_state["restock_new_price"] = 0.0
-        st.session_state["restock_apply_new_price"] = False
-        st.session_state["restock_iva"] = 0.0
+    # --- Inicializar valores sin reescribir widgets ya creados ---
+    for k, default in [
+        ("restock_qty", 1),
+        ("restock_invoice", 0.0),
+        ("restock_use_invoice", False),
+        ("restock_new_price", 0.0),
+        ("restock_apply_new_price", False),
+        ("restock_iva", 0.0),
+    ]:
+        st.session_state.setdefault(k, default)
 
-    if "restock_qty" not in st.session_state:
-        _reset_restock_fields()
-
-    qty = st.number_input("Cantidad a agregar", min_value=1, step=1, value=st.session_state.get("restock_qty", 1), key="restock_qty")
+    qty = st.number_input("Cantidad a agregar", min_value=1, step=1, key="restock_qty")
     invoice_total = st.number_input(
-        "Valor total de la factura (opcional)", min_value=0.0, step=100.0, format="%.2f",
-        value=st.session_state.get("restock_invoice", 0.0), key="restock_invoice"
+        "Valor total de la factura (opcional)", min_value=0.0, step=100.0, format="%.2f", key="restock_invoice"
     )
     use_invoice = st.checkbox(
-        "Usar valor de la factura para actualizar costo unitario",
-        value=st.session_state.get("restock_use_invoice", False),
-        key="restock_use_invoice",
+        "Usar valor de la factura para actualizar costo unitario", key="restock_use_invoice"
     )
-    iva_percent = st.number_input("IVA % (solo para PDF de factura)", min_value=0.0, max_value=100.0, step=1.0,
-                                  value=st.session_state.get("restock_iva", 0.0), key="restock_iva")
+    iva_percent = st.number_input("IVA % (solo para PDF de factura)", min_value=0.0, max_value=100.0, step=1.0, key="restock_iva")
     new_price = st.number_input(
-        "Nuevo precio de venta (opcional)", min_value=0.0, step=100.0, format="%.2f",
-        value=st.session_state.get("restock_new_price", 0.0), key="restock_new_price"
+        "Nuevo precio de venta (opcional)", min_value=0.0, step=100.0, format="%.2f", key="restock_new_price"
     )
     apply_new_price = st.checkbox(
-        "Actualizar precio de venta con el valor anterior",
-        value=st.session_state.get("restock_apply_new_price", False),
-        key="restock_apply_new_price",
+        "Actualizar precio de venta con el valor anterior", key="restock_apply_new_price"
     )
 
     colA, colB = st.columns(2)
@@ -1031,24 +1005,23 @@ def page_restock() -> None:
             price_val = float(new_price) if apply_new_price else None
             ok, msg = restock_with_invoice(products[idx]["id"], int(qty), inv_val, price_val)
             if ok:
-                extra = []
-                if inv_val is not None and qty > 0:
-                    extra.append(
-                        f"Factura: {CURRENCY}{money_dot_thousands(invoice_total)}  |  "
-                        f"Costo unit.: {CURRENCY}{money_dot_thousands(invoice_total/qty)}"
-                    )
-                if price_val is not None:
-                    extra.append(f"Nuevo precio: {CURRENCY}{money_dot_thousands(new_price)}")
-                detalle = " — " + " — ".join(extra) if extra else ""
-                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}{detalle}")
-                _reset_restock_fields()
+                detalle = []
+                if inv_val and qty > 0:
+                    detalle.append(f"Factura: {CURRENCY}{money_dot_thousands(invoice_total)}")
+                    detalle.append(f"Costo unit.: {CURRENCY}{money_dot_thousands(invoice_total/qty)}")
+                if price_val:
+                    detalle.append(f"Nuevo precio: {CURRENCY}{money_dot_thousands(new_price)}")
+                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}  {' — '.join(detalle)}")
+                # limpiar estado para dejar el formulario listo sin romper widgets
+                for k in ["restock_qty","restock_invoice","restock_use_invoice","restock_new_price","restock_apply_new_price","restock_iva"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
             else:
                 st.error(msg)
 
     with col2:
         with st.expander("Eliminar este producto (acción irreversible)"):
-            st.warning("Para evitar inconsistencias, solo se puede eliminar si **no tiene ventas ni facturas**.")
+            st.warning("Solo se puede eliminar si no tiene ventas ni facturas registradas.")
             confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.")
             type_ok = st.text_input("Escribe ELIMINAR para confirmar").strip().upper() == "ELIMINAR"
             if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not (confirm and type_ok)):
@@ -1196,7 +1169,7 @@ def main() -> None:
         st.session_state.pop("nav", None)
         st.session_state["page"] = "Vendedor"
 
-    # >>> Menú sin "Informe"
+    # Menú SIN "Informe"
     options = ["Vender producto", "factura de compra", "Reponer", "Inventario"]
     current_page = st.session_state.get("page", "Vender producto")
     default_nav_value = current_page if current_page in options else options[0]
@@ -1229,3 +1202,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+'''
+with open('/mnt/data/app_clean.py', 'w', encoding='utf-8') as f:
+    f.write(code)
+
+'/mnt/data/app_clean.py'
