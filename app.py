@@ -328,16 +328,12 @@ def update_product_by_code(code: str, name: str, price: float, stock: int, cost:
 
 
 def delete_product(product_id: int) -> Tuple[bool, str]:
-    """Elimina un producto si no tiene ventas ni facturas asociadas (evita orfandad)."""
+    """Elimina un producto aunque tenga ventas o facturas registradas."""
     try:
         with get_conn() as conn:
-            s = conn.execute("SELECT COUNT(1) FROM sales WHERE product_id=?", (product_id,)).fetchone()[0]
-            i = conn.execute("SELECT COUNT(1) FROM invoices WHERE product_id=?", (product_id,)).fetchone()[0]
-            if (s or 0) > 0 or (i or 0) > 0:
-                return False, "No se puede eliminar: el producto tiene ventas o facturas registradas."
             conn.execute("DELETE FROM products WHERE id=?", (product_id,))
             conn.commit()
-        return True, "Producto eliminado."
+        return True, "Producto eliminado permanentemente."
     except Exception as e:
         return False, f"No se pudo eliminar el producto: {e}"
 
@@ -903,6 +899,40 @@ def page_products() -> None:
     else:
         st.info("Aún no hay productos.")
 
+    # === NUEVO: Eliminar producto por selección (independiente de Reponer) ===
+    st.markdown("### Borrar producto")
+    with st.expander("Eliminar un producto (acción irreversible)", expanded=False):
+        rows_del = list_products_db()
+        if not rows_del:
+            st.info("No hay productos para eliminar.")
+        else:
+            etiquetas = [
+                f"[{r['code'] or r['id']}] {r['name']} — stock {r['stock']}"
+                for r in rows_del
+            ]
+            idx_del = st.selectbox(
+                "Producto a eliminar",
+                options=list(range(len(rows_del))),
+                format_func=lambda i: etiquetas[i],
+                key="delete_idx_products"
+            )
+
+            confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.", key="delete_confirm_products")
+
+            if st.button(
+                "Eliminar producto",
+                type="primary",
+                use_container_width=True,
+                disabled=not confirm,
+                key="delete_btn_products"
+            ):
+                ok, msg = delete_product(int(rows_del[idx_del]["id"]))
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
     # Últimas facturas
     st.markdown("### Últimas facturas de compra")
     inv = list_invoices(limit=20)
@@ -1019,17 +1049,38 @@ def page_restock() -> None:
                 st.error(msg)
 
     with col2:
-        with st.expander("Eliminar este producto (acción irreversible)"):
-            st.warning("Solo se puede eliminar si no tiene ventas ni facturas registradas.")
-            confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.")
-            type_ok = st.text_input("Escribe ELIMINAR para confirmar").strip().upper() == "ELIMINAR"
-            if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not (confirm and type_ok)):
-                ok, msg = delete_product(products[idx]["id"])
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+        # === Eliminar por selección de nombre (independiente del selector de reponer) ===
+        with st.expander("Eliminar producto por nombre (acción irreversible)"):
+            rows_del = list_products_db()
+            if not rows_del:
+                st.info("No hay productos para eliminar.")
+            else:
+                etiquetas = [
+                    f"[{r['code'] or r['id']}] {r['name']} — stock {r['stock']}"
+                    for r in rows_del
+                ]
+                idx_del = st.selectbox(
+                    "Producto a eliminar",
+                    options=list(range(len(rows_del))),
+                    format_func=lambda i: etiquetas[i],
+                    key="delete_idx_restock"
+                )
+
+                confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.", key="delete_confirm_restock")
+
+                if st.button(
+                    "Eliminar producto",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not confirm,
+                    key="delete_btn_restock"
+                ):
+                    ok, msg = delete_product(int(rows_del[idx_del]["id"]))
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 
 def page_inventory() -> None:
@@ -1075,6 +1126,7 @@ def page_inventory() -> None:
         restock_after = int(invoices_after.get(p["id"], 0) if isinstance(invoices_after, dict) else 0)
         stock_at_cut = max(cur_stock + sold_after - restock_after, 0)
 
+    # Totales actuales
         costo_total = float(p["cost"] or 0) * cur_stock
         venta_total = float(p["price"] or 0) * cur_stock
         costo_total_cut = float(p["cost"] or 0) * stock_at_cut
