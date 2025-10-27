@@ -152,12 +152,12 @@ def init_db() -> None:
             """
         )
 
-        # -- Productos
+        # -- Products SIN UNIQUE EN name
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS products(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
                 price REAL NOT NULL CHECK(price>=0),
                 stock INTEGER NOT NULL DEFAULT 0 CHECK(stock>=0),
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -209,6 +209,40 @@ def init_db() -> None:
             );
             """
         )
+
+        # ====== MIGRACIÓN: si la tabla tiene UNIQUE en name, reconstruir sin UNIQUE ======
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='products'").fetchone()
+        sql_products = (row["sql"] if row and "sql" in row.keys() else (row[0] if row else "")) or ""
+        if "name TEXT NOT NULL UNIQUE" in sql_products:
+            conn.execute("PRAGMA foreign_keys=off")
+            conn.execute("ALTER TABLE products RENAME TO _products_old")
+            conn.execute(
+                """
+                CREATE TABLE products(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    price REAL NOT NULL CHECK(price>=0),
+                    stock INTEGER NOT NULL DEFAULT 0 CHECK(stock>=0),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    code TEXT,
+                    cost REAL NOT NULL DEFAULT 0,
+                    iva REAL NOT NULL DEFAULT 0,
+                    company TEXT
+                );
+                """
+            )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_code_unique ON products(code)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_products_company ON products(company)")
+            conn.execute(
+                """
+                INSERT INTO products(id, name, price, stock, created_at, code, cost, iva, company)
+                SELECT id, name, price, stock, created_at, code, COALESCE(cost,0), COALESCE(iva,0), company
+                FROM _products_old
+                """
+            )
+            conn.execute("DROP TABLE _products_old")
+            conn.execute("PRAGMA foreign_keys=on")
+
         conn.commit()
 
 
@@ -303,8 +337,9 @@ def add_product(code: str, name: str, price: float, stock: int, cost: float, iva
         return True, f"Producto '{name}' agregado."
     except sqlite3.IntegrityError as e:
         m = str(e).lower()
-        if "name" in m:
-            return False, "Ya existe un producto con ese nombre."
+        # Solo bloquear si el conflicto es por CÓDIGO duplicado
+        if "unique" in m and ("products.code" in m or ".code" in m or "idx_products_code_unique" in m):
+            return False, "Ya existe un producto con ese CÓDIGO."
         return False, "No se pudo guardar el producto."
 
 
@@ -328,7 +363,7 @@ def update_product_by_code(code: str, name: str, price: float, stock: int, cost:
 
 
 def delete_product(product_id: int) -> Tuple[bool, str]:
-    """Elimina un producto aunque tenga ventas o facturas registradas."""
+    """Elimina un producto aunque tenga ventas o facturas registradas (borrado duro)."""
     try:
         with get_conn() as conn:
             conn.execute("DELETE FROM products WHERE id=?", (product_id,))
@@ -342,6 +377,15 @@ def get_product_by_code(code: str) -> Optional[sqlite3.Row]:
     with get_conn() as conn:
         return conn.execute(
             "SELECT id, code, name, price, stock, cost, iva, company FROM products WHERE code=?", (code.strip(),)
+        ).fetchone()
+
+# Nuevo: búsqueda por nombre (primer match exacto, insensible a mayúsculas)
+def get_product_by_name(name: str) -> Optional[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, code, name, price, stock, cost, iva, company "
+            "FROM products WHERE LOWER(name)=LOWER(?) LIMIT 1",
+            (name.strip(),),
         ).fetchone()
 
 
@@ -899,7 +943,7 @@ def page_products() -> None:
     else:
         st.info("Aún no hay productos.")
 
-    # === NUEVO: Eliminar producto por selección (independiente de Reponer) ===
+    # === Eliminar producto por selección (confirmación simple) ===
     st.markdown("### Borrar producto")
     with st.expander("Eliminar un producto (acción irreversible)", expanded=False):
         rows_del = list_products_db()
@@ -962,11 +1006,69 @@ def page_restock() -> None:
     products = list_products_db()
     if not products:
         st.info("No hay productos para reponer.")
+        # Aún así permite crear un producto nuevo aquí:
+        st.markdown("### Crear producto rápido")
+        ncode = st.text_input("Código nuevo", key="restock_create_code_empty")
+        nname = st.text_input("Nombre nuevo", key="restock_create_name_empty")
+        if st.button("Crear producto", use_container_width=True, key="restock_create_btn_empty"):
+            ok, msg = add_product(ncode, nname, 0.0, 0, 0.0, 0.0, "")
+            show_msg(ok, msg)
+            if ok:
+                st.rerun()
         return
 
-    # *** SOLO NOMBRE DEL PRODUCTO EN EL SELECTOR ***
-    names = [p["name"] for p in products]
+    # ====== NUEVO: Crear / Cargar por CÓDIGO o NOMBRE ======
+    with st.expander("Crear o cargar producto por código/nombre", expanded=True):
+        colx1, colx2, colx3 = st.columns([2, 2, 1])
+        with colx1:
+            quick_code = st.text_input("Código del producto", key="restock_quick_code")
+        with colx2:
+            quick_name = st.text_input("Nombre del producto", key="restock_quick_name")
+        with colx3:
+            st.markdown("<div style='height:7px'></div>", unsafe_allow_html=True)
+            if st.button("Cargar (si existe)", key="restock_quick_load", use_container_width=True):
+                row = None
+                if quick_code.strip():
+                    row = get_product_by_code(quick_code.strip())
+                if (row is None) and quick_name.strip():
+                    row = get_product_by_name(quick_name.strip())
+                if row:
+                    # Colocar el índice del selectbox al producto encontrado
+                    ids = [p["id"] for p in products]
+                    try:
+                        st.session_state["restock_idx"] = ids.index(row["id"])
+                        st.success(f"Producto cargado: [{row['code']}] {row['name']}")
+                        st.rerun()
+                    except ValueError:
+                        st.warning("Encontrado, pero no visible en la lista.")
+                else:
+                    st.warning("No se encontró. Puedes crearlo abajo.")
+
+        coly1, coly2 = st.columns([1, 1])
+        with coly1:
+            if st.button("Crear producto (solo con código y nombre)", key="restock_quick_create", use_container_width=True):
+                if not quick_code.strip() or not quick_name.strip():
+                    st.error("Escribe CÓDIGO y NOMBRE para crear.")
+                else:
+                    ok, msg = add_product(quick_code.strip(), quick_name.strip(), 0.0, 0, 0.0, 0.0, "")
+                    show_msg(ok, msg)
+                    if ok:
+                        st.rerun()
+        with coly2:
+            st.caption("Se crean con precio, costo, IVA y unidades = 0 (puedes ajustarlos al reponer).")
+
+    # *** Mostrar [codigo] nombre para distinguir repetidos ***
+    names = [f"[{p['code'] or p['id']}] {p['name']}" for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
+
+    # Botón rápido: borrar el producto actualmente seleccionado
+    col_del_sel, _ = st.columns([1, 3])
+    with col_del_sel:
+        if st.button("Borrar producto seleccionado", use_container_width=True, key="restock_delete_selected"):
+            ok, msg = delete_product(int(products[idx]["id"]))
+            show_msg(ok, msg)
+            if ok:
+                st.rerun()
 
     # --- Inicializar valores sin reescribir widgets ya creados ---
     for k, default in [
@@ -1126,7 +1228,7 @@ def page_inventory() -> None:
         restock_after = int(invoices_after.get(p["id"], 0) if isinstance(invoices_after, dict) else 0)
         stock_at_cut = max(cur_stock + sold_after - restock_after, 0)
 
-    # Totales actuales
+        # Totales actuales
         costo_total = float(p["cost"] or 0) * cur_stock
         venta_total = float(p["price"] or 0) * cur_stock
         costo_total_cut = float(p["cost"] or 0) * stock_at_cut
