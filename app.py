@@ -616,6 +616,7 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
                             business_name: str = "", nit: str = ""):
     """
     PDF de compra breve: CÓDIGO | CANTIDAD | NOMBRE | IVA | VALOR UNITARIO | TOTAL DE LA FACTURA
+    (ajustado: columnas más estrechas y centradas)
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
@@ -645,20 +646,21 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
         money_dot_thousands(total_factura),
     ])
 
-    table = Table(data, colWidths=[90, 70, 220, 80, 100, 120])
+    # Más compacto y centrado
+    table = Table(data, colWidths=[65, 60, 240, 60, 85, 85])
     table.setStyle(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (0, -1), "LEFT"),   # Código
-                ("ALIGN", (1, 1), (1, -1), "RIGHT"),  # Unidades
-                ("ALIGN", (2, 1), (2, -1), "LEFT"),   # Nombre
-                ("ALIGN", (3, 1), (5, -1), "RIGHT"),  # IVA, Unitario, Total
+                ("ALIGN", (0, 1), (0, -1), "CENTER"),   # Código
+                ("ALIGN", (1, 1), (1, -1), "CENTER"),   # Unidades
+                ("ALIGN", (2, 1), (2, -1), "LEFT"),     # Nombre
+                ("ALIGN", (3, 1), (5, -1), "CENTER"),   # IVA, Unitario, Total
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
                 ("FONTSIZE", (0, 0), (-1, -1), 10),
             ]
         )
@@ -672,6 +674,7 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
 def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business_name: str = "", nit: str = ""):
     """
     PDF multi-ítem por empresa (alineado y con fila TOTAL).
+    (ajustado: columnas más estrechas y centradas)
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
@@ -708,28 +711,28 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
             money_dot_thousands(total),
         ])
 
-    # Fila de totales (unimos las 4 primeras celdas)
+    # Fila de totales
     data.append(["", "", "", "", "TOTAL", money_dot_thousands(total_general)])
 
-    table = Table(data, colWidths=[90, 70, 220, 80, 100, 120])
+    table = Table(data, colWidths=[65, 60, 240, 60, 85, 85])
     table.setStyle(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (0, -2), "LEFT"),     # Código
-                ("ALIGN", (1, 1), (1, -2), "RIGHT"),    # Unidades
-                ("ALIGN", (2, 1), (2, -2), "LEFT"),     # Nombre
-                ("ALIGN", (3, 1), (5, -2), "RIGHT"),    # IVA, Unitario, Total
+                ("ALIGN", (0, 1), (0, -2), "CENTER"),    # Código
+                ("ALIGN", (1, 1), (1, -2), "CENTER"),    # Unidades
+                ("ALIGN", (2, 1), (2, -2), "LEFT"),      # Nombre
+                ("ALIGN", (3, 1), (5, -2), "CENTER"),    # IVA, Unitario, Total
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
                 # Fila TOTAL
                 ("SPAN", (0, -1), (3, -1)),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
                 ("FONTNAME", (4, -1), (5, -1), "Helvetica-Bold"),
-                ("ALIGN", (4, -1), (5, -1), "RIGHT"),
+                ("ALIGN", (4, -1), (5, -1), "CENTER"),
                 ("FONTSIZE", (0, 0), (-1, -1), 10),
             ]
         )
