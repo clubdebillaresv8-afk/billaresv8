@@ -438,6 +438,7 @@ def list_invoices(limit: Optional[int] = 15) -> List[sqlite3.Row]:
 def restock_with_invoice(
     product_id: int, qty: int, invoice_total: Optional[float], new_price: Optional[float]
 ) -> Tuple[bool, str]:
+    # IMPORTANTE: Reponer solo ajusta inventario y, opcionalmente, costo.
     if qty <= 0:
         return False, "La cantidad debe ser mayor a 0."
     if invoice_total is not None and invoice_total < 0:
@@ -458,6 +459,7 @@ def restock_with_invoice(
             unit_cost = round(float(invoice_total) / int(qty), 4)
             sets.append("cost=?"); params.append(unit_cost)
 
+        # new_price se mantiene por compatibilidad, pero ya no se usa en la UI de Reponer
         if new_price is not None:
             sets.append("price=?"); params.append(float(new_price))
 
@@ -478,8 +480,6 @@ def restock_with_invoice(
             f"factura {CURRENCY}{money_dot_thousands(invoice_total)} "
             f"(costo unit. {CURRENCY}{money_dot_thousands(unit_cost)})"
         )
-    if new_price is not None:
-        extras.append(f"precio {CURRENCY}{money_dot_thousands(new_price)}")
     extra_msg = " — " + ", ".join(extras) if extras else ""
     return True, f"Stock actualizado a {new_stock}.{extra_msg}"
 
@@ -646,7 +646,6 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
         money_dot_thousands(total_factura),
     ])
 
-    # Más compacto y centrado
     table = Table(data, colWidths=[65, 60, 240, 60, 85, 85])
     table.setStyle(
         TableStyle(
@@ -654,10 +653,10 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (0, -1), "CENTER"),   # Código
-                ("ALIGN", (1, 1), (1, -1), "CENTER"),   # Unidades
-                ("ALIGN", (2, 1), (2, -1), "LEFT"),     # Nombre
-                ("ALIGN", (3, 1), (5, -1), "CENTER"),   # IVA, Unitario, Total
+                ("ALIGN", (0, 1), (0, -1), "CENTER"),
+                ("ALIGN", (1, 1), (1, -1), "CENTER"),
+                ("ALIGN", (2, 1), (2, -1), "LEFT"),
+                ("ALIGN", (3, 1), (5, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 5),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 5),
@@ -711,7 +710,6 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
             money_dot_thousands(total),
         ])
 
-    # Fila de totales
     data.append(["", "", "", "", "TOTAL", money_dot_thousands(total_general)])
 
     table = Table(data, colWidths=[65, 60, 240, 60, 85, 85])
@@ -721,14 +719,13 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (0, -2), "CENTER"),    # Código
-                ("ALIGN", (1, 1), (1, -2), "CENTER"),    # Unidades
-                ("ALIGN", (2, 1), (2, -2), "LEFT"),      # Nombre
-                ("ALIGN", (3, 1), (5, -2), "CENTER"),    # IVA, Unitario, Total
+                ("ALIGN", (0, 1), (0, -2), "CENTER"),
+                ("ALIGN", (1, 1), (1, -2), "CENTER"),
+                ("ALIGN", (2, 1), (2, -2), "LEFT"),
+                ("ALIGN", (3, 1), (5, -2), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 5),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                # Fila TOTAL
                 ("SPAN", (0, -1), (3, -1)),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
                 ("FONTNAME", (4, -1), (5, -1), "Helvetica-Bold"),
@@ -1096,9 +1093,6 @@ def page_restock() -> None:
         ("restock_qty", 1),
         ("restock_invoice", 0.0),
         ("restock_use_invoice", False),
-        ("restock_new_price", 0.0),
-        ("restock_apply_new_price", False),
-        ("restock_iva", 0.0),
     ]:
         st.session_state.setdefault(k, default)
 
@@ -1108,13 +1102,6 @@ def page_restock() -> None:
     )
     use_invoice = st.checkbox(
         "Usar valor de la factura para actualizar costo unitario", key="restock_use_invoice"
-    )
-    iva_percent = st.number_input("IVA % (solo para PDF de factura)", min_value=0.0, max_value=100.0, step=1.0, key="restock_iva")
-    new_price = st.number_input(
-        "Nuevo precio de venta (opcional)", min_value=0.0, step=100.0, format="%.2f", key="restock_new_price"
-    )
-    apply_new_price = st.checkbox(
-        "Actualizar precio de venta con el valor anterior", key="restock_apply_new_price"
     )
 
     colA, colB = st.columns(2)
@@ -1129,8 +1116,9 @@ def page_restock() -> None:
             if reportlab_ok():
                 p = products[idx]
                 unit_val = float(invoice_total) / int(qty)
+                # IVA se elimina en la UI de Reponer => se envía 0.0 al PDF
                 pdf_bytes, _ = build_invoice_pdf_brief(
-                    code=p["code"], qty=int(qty), name=p["name"], unit_value=unit_val, iva_percent=float(iva_percent),
+                    code=p["code"], qty=int(qty), name=p["name"], unit_value=unit_val, iva_percent=0.0,
                     business_name=st.session_state.get("pdf_empresa", ""), nit=st.session_state.get("pdf_nit", "")
                 )
                 st.download_button(
@@ -1144,27 +1132,22 @@ def page_restock() -> None:
         else:
             st.info("Ingresa cantidad y valor de factura y marca la casilla para ver el costo unitario.")
     with colB:
-        if apply_new_price and new_price > 0:
-            st.info(f"Nuevo precio de venta a aplicar: {CURRENCY}{money_dot_thousands(new_price)}")
-        else:
-            st.info("Puedes indicar un nuevo precio y marcar la casilla para aplicarlo.")
+        st.info("Reposición: solo mueve inventario y actualiza costo (si indicas factura). No es una venta.")
 
     # ---- Acciones ----
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Reponer", use_container_width=True):
             inv_val = float(invoice_total) if use_invoice else None
-            price_val = float(new_price) if apply_new_price else None
-            ok, msg = restock_with_invoice(products[idx]["id"], int(qty), inv_val, price_val)
+            # Ya no se admite nuevo precio desde 'Reponer'
+            ok, msg = restock_with_invoice(products[idx]["id"], int(qty), inv_val, None)
             if ok:
                 detalle = []
                 if inv_val and qty > 0:
                     detalle.append(f"Factura: {CURRENCY}{money_dot_thousands(invoice_total)}")
                     detalle.append(f"Costo unit.: {CURRENCY}{money_dot_thousands(invoice_total/qty)}")
-                if price_val:
-                    detalle.append(f"Nuevo precio: {CURRENCY}{money_dot_thousands(new_price)}")
                 st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}  {' — '.join(detalle)}")
-                for k in ["restock_qty","restock_invoice","restock_use_invoice","restock_new_price","restock_apply_new_price","restock_iva"]:
+                for k in ["restock_qty","restock_invoice","restock_use_invoice"]:
                     st.session_state.pop(k, None)
                 st.rerun()
             else:
