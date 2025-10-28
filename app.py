@@ -652,8 +652,13 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-                ("ALIGN", (2, 1), (2, 1), "LEFT"),
+                ("ALIGN", (0, 1), (0, -1), "LEFT"),   # Código
+                ("ALIGN", (1, 1), (1, -1), "RIGHT"),  # Unidades
+                ("ALIGN", (2, 1), (2, -1), "LEFT"),   # Nombre
+                ("ALIGN", (3, 1), (5, -1), "RIGHT"),  # IVA, Unitario, Total
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ("FONTSIZE", (0, 0), (-1, -1), 10),
             ]
         )
@@ -666,7 +671,7 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
 
 def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business_name: str = "", nit: str = ""):
     """
-    PDF multi-ítem por empresa.
+    PDF multi-ítem por empresa (alineado y con fila TOTAL).
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
@@ -679,7 +684,10 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
 
     titulo = f"<b>{business_name} – NIT {nit}</b>" if (business_name or nit) else "<b>Factura por empresa</b>"
     title = Paragraph(titulo, styles["Title"])
-    subtitle = Paragraph(f"Empresa: <b>{company}</b> — Fecha/Hora: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"])
+    subtitle = Paragraph(
+        f"Empresa: <b>{company}</b> — Fecha/Hora: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        styles["Normal"]
+    )
 
     header = ["Código", "Unidades", "Nombre", "IVA", "Valor unitario", "Total"]
     data = [header]
@@ -691,9 +699,16 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
         unit = float(r["cost"] or 0.0)
         total = qty * unit * (1.0 + iva/100.0)
         total_general += total
-        data.append([str(r["code"]), f"{qty}", str(r["name"]), f"{iva:.2f} %",
-                     money_dot_thousands(unit), money_dot_thousands(total)])
+        data.append([
+            str(r["code"]),
+            f"{qty}",
+            str(r["name"]),
+            f"{iva:.2f} %",
+            money_dot_thousands(unit),
+            money_dot_thousands(total),
+        ])
 
+    # Fila de totales (unimos las 4 primeras celdas)
     data.append(["", "", "", "", "TOTAL", money_dot_thousands(total_general)])
 
     table = Table(data, colWidths=[90, 70, 220, 80, 100, 120])
@@ -703,10 +718,18 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (1, 1), (-1, -2), "RIGHT"),
-                ("ALIGN", (2, 1), (2, -2), "LEFT"),
-                ("FONTNAME", (4, -1), (5, -1), "Helvetica-Bold"),
+                ("ALIGN", (0, 1), (0, -2), "LEFT"),     # Código
+                ("ALIGN", (1, 1), (1, -2), "RIGHT"),    # Unidades
+                ("ALIGN", (2, 1), (2, -2), "LEFT"),     # Nombre
+                ("ALIGN", (3, 1), (5, -2), "RIGHT"),    # IVA, Unitario, Total
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                # Fila TOTAL
+                ("SPAN", (0, -1), (3, -1)),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
+                ("FONTNAME", (4, -1), (5, -1), "Helvetica-Bold"),
+                ("ALIGN", (4, -1), (5, -1), "RIGHT"),
                 ("FONTSIZE", (0, 0), (-1, -1), 10),
             ]
         )
@@ -890,7 +913,7 @@ def page_products() -> None:
 
     st.divider()
 
-    # PDF por EMPRESA
+    # ===================== PDF por EMPRESA (UN SOLO BOTÓN) =====================
     st.markdown("### Factura PDF por empresa")
     cc1, cc2 = st.columns([2, 1])
     with cc1:
@@ -898,26 +921,22 @@ def page_products() -> None:
     with cc2:
         st.write("")
         if reportlab_ok():
-            st.session_state.setdefault("pdf_generado_empresa", False)
-            gen_disabled = st.session_state["pdf_generado_empresa"] or not empresa_query.strip()
-            if st.button("Generar PDF por empresa", use_container_width=True, disabled=gen_disabled):
-                rows = fetch_products_by_company(empresa_query.strip()) if empresa_query.strip() else []
-                if rows:
-                    pdf_bytes, _ = build_company_invoice_pdf(
-                        rows=rows, company=empresa_query.strip(),
-                        business_name=st.session_state.get("pdf_empresa", ""), nit=st.session_state.get("pdf_nit", "")
-                    )
-                    st.download_button(
-                        "Descargar PDF por empresa",
-                        data=pdf_bytes,
-                        file_name=f"factura_empresa_{empresa_query.strip()}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key=f"dl_company_{dt.datetime.now().timestamp()}",
-                    )
-                    st.session_state["pdf_generado_empresa"] = True
-                else:
-                    st.warning("No hay productos para esa empresa.")
+            rows = fetch_products_by_company(empresa_query.strip()) if empresa_query.strip() else []
+            if rows:
+                pdf_bytes, _ = build_company_invoice_pdf(
+                    rows=rows, company=empresa_query.strip(),
+                    business_name=st.session_state.get("pdf_empresa", ""), nit=st.session_state.get("pdf_nit", "")
+                )
+                st.download_button(
+                    "Descargar PDF por empresa",
+                    data=pdf_bytes,
+                    file_name=f"factura_empresa_{empresa_query.strip()}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"dl_company_single_{dt.datetime.now().timestamp()}",
+                )
+            else:
+                st.warning("No hay productos para esa empresa o no has escrito un nombre.")
         else:
             st.warning("Para exportar a PDF instala: pip install reportlab")
 
@@ -1033,7 +1052,6 @@ def page_restock() -> None:
                 if (row is None) and quick_name.strip():
                     row = get_product_by_name(quick_name.strip())
                 if row:
-                    # Colocar el índice del selectbox al producto encontrado
                     ids = [p["id"] for p in products]
                     try:
                         st.session_state["restock_idx"] = ids.index(row["id"])
@@ -1143,7 +1161,6 @@ def page_restock() -> None:
                 if price_val:
                     detalle.append(f"Nuevo precio: {CURRENCY}{money_dot_thousands(new_price)}")
                 st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}  {' — '.join(detalle)}")
-                # limpiar estado para dejar el formulario listo sin romper widgets
                 for k in ["restock_qty","restock_invoice","restock_use_invoice","restock_new_price","restock_apply_new_price","restock_iva"]:
                     st.session_state.pop(k, None)
                 st.rerun()
