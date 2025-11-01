@@ -836,7 +836,7 @@ def page_sell() -> None:
 
 
 def page_products() -> None:
-    # Empresa + NIT para PDF
+    # Empresa + NIT para PDF por empresa
     st.session_state.setdefault("pdf_empresa", "")
     st.session_state.setdefault("pdf_nit", "")
 
@@ -862,20 +862,19 @@ def page_products() -> None:
                 st.session_state[base + "price"] = float(r["price"] or 0.0)
                 st.session_state[base + "stock"] = int(r["stock"] or 0)
                 st.session_state[base + "iva"] = float(r["iva"] or 0.0)
-                st.session_state[base + "company"] = r["company"] or ""
 
         code = st.text_input("Código", placeholder="Ejemplo C-001",
                              key=base + "code", on_change=_on_code_change)
         name = st.text_input("Nombre", placeholder="Ej. Cerveza", key=base + "name")
-        company = st.text_input("Empresa/Proveedor (para agrupar)", placeholder="Ej. Proveedor X", key=base + "company")
+        # ⬇️ Eliminado: campo Empresa/Proveedor
         cost = st.number_input("Costo unitario (de factura)", min_value=0.0, step=100.0, format="%.2f", value=0.0, key=base + "cost")
         price = st.number_input("Precio de venta", min_value=0.0, step=100.0, format="%.2f", key=base + "price")
         iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0, key=base + "iva")
         stock = st.number_input("Unidades", min_value=0, step=1, value=0, key=base + "stock")
 
-        # Solo guardar producto (se eliminó el botón de "Generar y descargar PDF")
         if st.button("Guardar producto", type="primary", key=f"save_new_{nonce}"):
-            ok, msg = add_product(code, name, float(price), int(stock), float(cost), float(iva), company)
+            # Pasamos company="" porque se eliminó del formulario
+            ok, msg = add_product(code, name, float(price), int(stock), float(cost), float(iva), "")
             show_msg(ok, msg)
             if ok:
                 st.session_state["product_form_nonce"] = nonce + 1
