@@ -909,7 +909,7 @@ def page_products() -> None:
         else:
             st.warning("Para exportar a PDF instala: pip install reportlab")
 
-    # Tabla de productos
+    # Tabla de productos (SIN columna 'Empresa')
     data = list_products_db()
     if data:
         st.dataframe(
@@ -917,7 +917,7 @@ def page_products() -> None:
                 {
                     "Código": p["code"],
                     "Nombre": p["name"],
-                    "Empresa": p["company"] or "",
+                    # "Empresa": p["company"] or "",   # <- eliminado
                     "Costo unit.": p["cost"],
                     "Precio": p["price"],
                     "IVA %": p["iva"],
@@ -931,7 +931,7 @@ def page_products() -> None:
     else:
         st.info("Aún no hay productos.")
 
-    # === Eliminar producto por selección (confirmación simple) ===
+    # === Borrar producto ===
     st.markdown("### Borrar producto")
     with st.expander("Eliminar un producto (acción irreversible)", expanded=False):
         rows_del = list_products_db()
@@ -1176,7 +1176,7 @@ def page_inventory() -> None:
             {
                 "Código": p["code"],
                 "Nombre": p["name"],
-                "Empresa": p["company"] or "",
+                # "Empresa": p["company"] or "",  # <- eliminado en inventario también
                 "Stock": cur_stock,
                 "Costo unit.": money_dot_thousands(float(p["cost"] or 0)),
                 "Precio de venta": money_dot_thousands(float(p["price"] or 0)),
