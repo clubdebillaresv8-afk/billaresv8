@@ -3,7 +3,7 @@
 clubdebillaresV8 – POS simple con:
 - Login y gestión de usuarios
 - Productos (alta + PDF de empresa; autocompletar por código)
-- Reposición + registro de facturas de compra (con PDF breve)
+- Reposición (solo inventario; opcionalmente registra factura si se usa desde otras UIs)
 - Ventas + recibo PDF (una sola fila con totales)
 - Inventario a fecha
 - Pie de página con créditos
@@ -438,7 +438,10 @@ def list_invoices(limit: Optional[int] = 15) -> List[sqlite3.Row]:
 def restock_with_invoice(
     product_id: int, qty: int, invoice_total: Optional[float], new_price: Optional[float]
 ) -> Tuple[bool, str]:
-    # IMPORTANTE: Reponer solo ajusta inventario y, opcionalmente, costo.
+    """
+    Reponer: SOLO ajusta inventario (+qty) y, si se pasa invoice_total, actualiza costo unitario.
+    En la pantalla 'Reponer' actual usamos siempre invoice_total=None (no hay campos de factura).
+    """
     if qty <= 0:
         return False, "La cantidad debe ser mayor a 0."
     if invoice_total is not None and invoice_total < 0:
@@ -459,7 +462,7 @@ def restock_with_invoice(
             unit_cost = round(float(invoice_total) / int(qty), 4)
             sets.append("cost=?"); params.append(unit_cost)
 
-        # new_price se mantiene por compatibilidad, pero ya no se usa en la UI de Reponer
+        # new_price se mantiene por compatibilidad (no se usa desde 'Reponer')
         if new_price is not None:
             sets.append("price=?"); params.append(float(new_price))
 
@@ -646,6 +649,7 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
         money_dot_thousands(total_factura),
     ])
 
+    # Más compacto y centrado
     table = Table(data, colWidths=[65, 60, 240, 60, 85, 85])
     table.setStyle(
         TableStyle(
@@ -653,10 +657,10 @@ def build_invoice_pdf_brief(*, code: str, qty: int, name: str, unit_value: float
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (0, -1), "CENTER"),
-                ("ALIGN", (1, 1), (1, -1), "CENTER"),
-                ("ALIGN", (2, 1), (2, -1), "LEFT"),
-                ("ALIGN", (3, 1), (5, -1), "CENTER"),
+                ("ALIGN", (0, 1), (0, -1), "CENTER"),   # Código
+                ("ALIGN", (1, 1), (1, -1), "CENTER"),   # Unidades
+                ("ALIGN", (2, 1), (2, -1), "LEFT"),     # Nombre
+                ("ALIGN", (3, 1), (5, -1), "CENTER"),   # IVA, Unitario, Total
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 5),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 5),
@@ -710,6 +714,7 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
             money_dot_thousands(total),
         ])
 
+    # Fila de totales
     data.append(["", "", "", "", "TOTAL", money_dot_thousands(total_general)])
 
     table = Table(data, colWidths=[65, 60, 240, 60, 85, 85])
@@ -719,13 +724,14 @@ def build_company_invoice_pdf(*, rows: List[sqlite3.Row], company: str, business
                 ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (0, -2), "CENTER"),
-                ("ALIGN", (1, 1), (1, -2), "CENTER"),
-                ("ALIGN", (2, 1), (2, -2), "LEFT"),
-                ("ALIGN", (3, 1), (5, -2), "CENTER"),
+                ("ALIGN", (0, 1), (0, -2), "CENTER"),    # Código
+                ("ALIGN", (1, 1), (1, -2), "CENTER"),    # Unidades
+                ("ALIGN", (2, 1), (2, -2), "LEFT"),      # Nombre
+                ("ALIGN", (3, 1), (5, -2), "CENTER"),    # IVA, Unitario, Total
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 5),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                # Fila TOTAL
                 ("SPAN", (0, -1), (3, -1)),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
                 ("FONTNAME", (4, -1), (5, -1), "Helvetica-Bold"),
@@ -785,7 +791,7 @@ def login_screen() -> None:
         ok, user = verify_user(u, p)
         if ok:
             st.session_state["auth_user"] = user
-            st.session_state["page"] = "Vendedor"
+            st.session_state["page"] = "Vender producto"  # Página inicial consistente
             st.rerun()
         else:
             st.error("Usuario o contraseña incorrectos.")
@@ -867,49 +873,13 @@ def page_products() -> None:
         iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0, key=base + "iva")
         stock = st.number_input("Unidades", min_value=0, step=1, value=0, key=base + "stock")
 
-        col_save, col_pdf = st.columns([1, 1])
-        with col_save:
-            if st.button("Guardar producto", type="primary", key=f"save_new_{nonce}"):
-                ok, msg = add_product(code, name, float(price), int(stock), float(cost), float(iva), company)
-                show_msg(ok, msg)
-                if ok:
-                    st.session_state["product_form_nonce"] = nonce + 1
-                    st.rerun()
-
-        with col_pdf:
-            if reportlab_ok():
-                ready = bool(code.strip() or name.strip())
-                pdf_bytes = b""
-                if ready:
-                    empresa_titulo = (company or st.session_state.get("pdf_empresa", ""))
-                    if (company or "").strip():
-                        rows = fetch_products_by_company(company)
-                        if rows:
-                            pdf_bytes, _ = build_company_invoice_pdf(
-                                rows=rows, company=company.strip(),
-                                business_name=empresa_titulo, nit=st.session_state.get("pdf_nit", ""),
-                            )
-                        else:
-                            pdf_bytes, _ = build_invoice_pdf_brief(
-                                code=code, qty=int(stock), name=name, unit_value=float(cost),
-                                iva_percent=float(iva), business_name=empresa_titulo, nit=st.session_state.get("pdf_nit", ""),
-                            )
-                    else:
-                        pdf_bytes, _ = build_invoice_pdf_brief(
-                            code=code, qty=int(stock), name=name, unit_value=float(cost),
-                            iva_percent=float(iva), business_name=empresa_titulo, nit=st.session_state.get("pdf_nit", ""),
-                        )
-                st.download_button(
-                    "Generar y descargar PDF",
-                    data=pdf_bytes if ready else b"",
-                    file_name=f"factura_{(company or code or 'producto')}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    disabled=not ready,
-                    key=f"dl_once_{dt.datetime.now().timestamp()}",
-                )
-            else:
-                st.warning("Para exportar a PDF instala: pip install reportlab")
+        # Solo guardar producto (se eliminó el botón de "Generar y descargar PDF")
+        if st.button("Guardar producto", type="primary", key=f"save_new_{nonce}"):
+            ok, msg = add_product(code, name, float(price), int(stock), float(cost), float(iva), company)
+            show_msg(ok, msg)
+            if ok:
+                st.session_state["product_form_nonce"] = nonce + 1
+                st.rerun()
 
     st.divider()
 
@@ -1089,65 +1059,26 @@ def page_restock() -> None:
                 st.rerun()
 
     # --- Inicializar valores sin reescribir widgets ya creados ---
-    for k, default in [
-        ("restock_qty", 1),
-        ("restock_invoice", 0.0),
-        ("restock_use_invoice", False),
-    ]:
+    for k, default in [("restock_qty", 1)]:
         st.session_state.setdefault(k, default)
 
     qty = st.number_input("Cantidad a agregar", min_value=1, step=1, key="restock_qty")
-    invoice_total = st.number_input(
-        "Valor total de la factura (opcional)", min_value=0.0, step=100.0, format="%.2f", key="restock_invoice"
-    )
-    use_invoice = st.checkbox(
-        "Usar valor de la factura para actualizar costo unitario", key="restock_use_invoice"
-    )
 
     colA, colB = st.columns(2)
     with colA:
-        st.caption("Resumen de la factura ingresada:")
-        if use_invoice and qty > 0 and invoice_total > 0:
-            unit = invoice_total / qty
-            st.info(
-                f"Cantidad: {int(qty)}  |  Valor factura: {CURRENCY}{money_dot_thousands(invoice_total)}\n\n"
-                f"Costo unitario calculado: {CURRENCY}{money_dot_thousands(unit)}"
-            )
-            if reportlab_ok():
-                p = products[idx]
-                unit_val = float(invoice_total) / int(qty)
-                # IVA se elimina en la UI de Reponer => se envía 0.0 al PDF
-                pdf_bytes, _ = build_invoice_pdf_brief(
-                    code=p["code"], qty=int(qty), name=p["name"], unit_value=unit_val, iva_percent=0.0,
-                    business_name=st.session_state.get("pdf_empresa", ""), nit=st.session_state.get("pdf_nit", "")
-                )
-                st.download_button(
-                    "Generar y descargar PDF de factura",
-                    data=pdf_bytes,
-                    file_name=f"factura_{p['code'] or p['id']}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    key=f"dl_invoice_{dt.datetime.now().timestamp()}",
-                )
-        else:
-            st.info("Ingresa cantidad y valor de factura y marca la casilla para ver el costo unitario.")
+        st.info(f"Agregarás {int(qty)} unidades al inventario del producto seleccionado.")
     with colB:
-        st.info("Reposición: solo mueve inventario y actualiza costo (si indicas factura). No es una venta.")
+        st.info("Reposición: solo mueve inventario. No es una venta ni requiere datos de factura.")
 
     # ---- Acciones ----
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Reponer", use_container_width=True):
-            inv_val = float(invoice_total) if use_invoice else None
-            # Ya no se admite nuevo precio desde 'Reponer'
-            ok, msg = restock_with_invoice(products[idx]["id"], int(qty), inv_val, None)
+            # Sin datos de factura ni precio nuevo
+            ok, msg = restock_with_invoice(products[idx]["id"], int(qty), None, None)
             if ok:
-                detalle = []
-                if inv_val and qty > 0:
-                    detalle.append(f"Factura: {CURRENCY}{money_dot_thousands(invoice_total)}")
-                    detalle.append(f"Costo unit.: {CURRENCY}{money_dot_thousands(invoice_total/qty)}")
-                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}  {' — '.join(detalle)}")
-                for k in ["restock_qty","restock_invoice","restock_use_invoice"]:
+                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}")
+                for k in ["restock_qty"]:
                     st.session_state.pop(k, None)
                 st.rerun()
             else:
@@ -1312,10 +1243,11 @@ def main() -> None:
         render_footer()
         return
 
-    st.session_state.setdefault("page", "Vendedor")
+    # Página por defecto coherente con el radio
+    st.session_state.setdefault("page", "Vender producto")
 
     def _on_nav_change():
-        st.session_state["page"] = st.session_state.get("nav", "Vendedor")
+        st.session_state["page"] = st.session_state.get("nav", "Vender producto")
 
     def _go_usuarios():
         st.session_state["page"] = "Usuarios"
@@ -1323,16 +1255,21 @@ def main() -> None:
     def _logout():
         st.session_state["auth_user"] = None
         st.session_state.pop("nav", None)
-        st.session_state["page"] = "Vendedor"
+        st.session_state["page"] = "Vender producto"
 
     # Menú SIN "Informe"
     options = ["Vender producto", "factura de compra", "Reponer", "Inventario"]
     current_page = st.session_state.get("page", "Vender producto")
-    default_nav_value = current_page if current_page in options else options[0]
-    default_index = options.index(default_nav_value)
+    current_index = options.index(current_page) if current_page in options else 0
 
     with st.sidebar:
-        st.radio("", options, key="nav", index=default_index, on_change=_on_nav_change)
+        st.radio(
+            "",
+            options,
+            key="nav",
+            index=current_index,           # <-- usar index (compatible Streamlit 1.38)
+            on_change=_on_nav_change
+        )
         st.divider()
         st.button("Usuarios", use_container_width=True, on_click=_go_usuarios)
         st.button("Cerrar sesión", use_container_width=True, on_click=_logout)
