@@ -638,36 +638,47 @@ def build_company_invoice_pdf_with_sale(
     *, rows: List[dict], company: str, business_name: str = "", nit: str = ""
 ):
     """
-    PDF multi-ítem por empresa con columna Valor de venta.
-    rows: dicts con keys: code, qty, name, iva, unit_cost, sale_price
+    PDF multi-ítem por empresa con columnas numéricas sólidas y alineadas.
+    Evitamos Paragraph en celdas de datos para que no haya diferencias de leading/padding.
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
     from reportlab.lib import colors
+    import datetime as dt
 
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28
+    )
     styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleStrong", parent=styles["Title"], fontName="Helvetica-Bold", alignment=TA_CENTER)
 
-    titulo = f"<b>{business_name} – NIT {nit}</b>" if (business_name or nit) else "<b>Factura por empresa</b>"
-    title = Paragraph(titulo, styles["Title"])
+    title = Paragraph(
+        f"<b>{(business_name or 'Factura por empresa')}{(' – NIT ' + nit) if nit else ''}</b>",
+        title_style
+    )
     subtitle = Paragraph(
         f"Empresa: <b>{company}</b> — Fecha/Hora: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         styles["Normal"]
     )
 
-    header = ["Código", "Unidades", "Nombre", "IVA", "Valor unitario", "Valor de venta", "Total"]
-    data = [header]
-    total_general = 0.0
+    # Cabeceras en bold
+    hdr = ["Código", "Unidades", "Nombre", "IVA", "Valor unitario", "Valor de venta", "Total"]
+    data = [hdr]
 
+    total_general = 0
     for r in rows:
-        qty = int(r.get("qty", 0))
-        iva = float(r.get("iva", 0.0))
-        unit = float(r.get("unit_cost", 0.0))
-        sale = float(r.get("sale_price", 0.0))
-        total = qty * unit * (1.0 + iva/100.0)
-        total_general += total
+        qty   = int(r.get("qty", 0))
+        iva   = float(r.get("iva", 0.0))
+        unit  = float(r.get("unit_cost", 0.0))
+        sale  = float(r.get("sale_price", 0.0))
+        total_row = int(round(qty * unit * (1.0 + iva/100.0)))
+        total_general += total_row
+
+        # Solo strings → sin saltos/leading extra
         data.append([
             str(r.get("code", "")),
             f"{qty}",
@@ -675,38 +686,50 @@ def build_company_invoice_pdf_with_sale(
             f"{iva:.2f} %",
             money_dot_thousands(unit),
             money_dot_thousands(sale),
-            money_dot_thousands(total),
+            money_dot_thousands(total_row),
         ])
 
     data.append(["", "", "", "", "", "TOTAL", money_dot_thousands(total_general)])
 
-    table = Table(data, colWidths=[65, 60, 230, 60, 85, 85, 85])
-    table.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 1), (1, -2), "CENTER"),
-                ("ALIGN", (2, 1), (2, -2), "LEFT"),
-                ("ALIGN", (3, 1), (3, -2), "CENTER"),
-                ("ALIGN", (4, 1), (6, -2), "RIGHT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("SPAN", (0, -1), (5, -1)),
-                ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
-                ("FONTNAME", (6, -1), (6, -1), "Helvetica-Bold"),
-                ("ALIGN", (6, -1), (6, -1), "RIGHT"),
-                ("FONTSIZE", (0, 0), (-1, -1), 10),
-            ]
-        )
-    )
+    # Anchos: más espacio para columnas numéricas para evitar cortes/espacios raros.
+    col_widths = [50, 50, 200, 54, 80, 80, 90]
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 11),
+
+        # Alineaciones consistentes en TODO el cuerpo
+        ("ALIGN", (0, 1), (1, -2), "CENTER"),  # Código, Unidades
+        ("ALIGN", (2, 1), (2, -2), "LEFT"),    # Nombre
+        ("ALIGN", (3, 1), (3, -2), "CENTER"),  # IVA
+        ("ALIGN", (4, 1), (6, -2), "RIGHT"),   # Números
+
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+
+        # Padding uniforme → nada de “desplazados”
+        ("TOPPADDING", (0, 1), (-1, -2), 3),
+        ("BOTTOMPADDING", (0, 1), (-1, -2), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+
+        # Fila de TOTAL
+        ("SPAN", (0, -1), (5, -1)),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
+        ("FONTNAME", (5, -1), (6, -1), "Helvetica-Bold"),
+        ("ALIGN", (6, -1), (6, -1), "RIGHT"),
+    ]))
 
     doc.build([title, Spacer(1, 6), subtitle, Spacer(1, 8), table])
     pdf = buf.getvalue()
     buf.close()
     return pdf, None
+
+
+
+
 
 
 # =============================================================================
@@ -1011,7 +1034,7 @@ def page_products() -> None:
                     key=f"dl_hist_{r['batch_id']}",
                 )
 
-            # ---- NUEVO: borrar lote (con confirmación y opción de revertir stock)
+            # ---- Borrar lote (con confirmación y opción de revertir stock)
             del_col1, del_col2, del_col3 = st.columns([1.2, 1, 1.8])
             with del_col1:
                 revert = st.checkbox("Revertir stock", value=True, key=f"rev_{r['batch_id']}")
