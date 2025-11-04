@@ -728,10 +728,6 @@ def build_company_invoice_pdf_with_sale(
     return pdf, None
 
 
-
-
-
-
 # =============================================================================
 # PIE DE PÁGINA
 # =============================================================================
@@ -750,6 +746,37 @@ def render_footer() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+# =============================================================================
+# AUTOCARGA POR CÓDIGO (NUEVO)
+# =============================================================================
+def _load_item_from_code():
+    """
+    Si el código existe, carga en el formulario el nombre, IVA, costo y precio
+    para que el usuario lo edite y lo agregue a la factura.
+    Se ejecuta con on_change del input 'Código'.
+    """
+    code = (st.session_state.get("inv_code") or "").strip()
+    if not code:
+        st.session_state["inv_loaded_ok"] = False
+        st.session_state["inv_loaded_msg"] = ""
+        return
+
+    row = get_product_by_code(code)
+    if row:
+        st.session_state["inv_name"]  = row["name"] or ""
+        st.session_state["inv_iva"]   = float(row["iva"] or 0.0)
+        st.session_state["inv_cost"]  = float(row["cost"] or 0.0)
+        st.session_state["inv_price"] = float(row["price"] or 0.0)
+        # Si la empresa arriba está vacía, usar la del producto
+        if not (st.session_state.get("cur_company") or "").strip():
+            st.session_state["cur_company"] = row["company"] or ""
+        st.session_state["inv_loaded_ok"]  = True
+        st.session_state["inv_loaded_msg"] = f"Producto cargado: [{row['code']}] {row['name']}. Puedes editarlo y agregar."
+    else:
+        st.session_state["inv_loaded_ok"]  = False
+        st.session_state["inv_loaded_msg"] = "No existe un producto con ese código."
 
 
 # =============================================================================
@@ -820,21 +847,38 @@ def page_products() -> None:
         st.session_state["cur_nit"] = st.text_input("NIT", value=st.session_state["cur_nit"])
 
     with st.expander("Agregar ítem a la factura de compra", expanded=True):
+        # Defaults para evitar KeyError al autocompletar
+        st.session_state.setdefault("inv_code", "")
+        st.session_state.setdefault("inv_name", "")
+        st.session_state.setdefault("inv_qty", 0)
+        st.session_state.setdefault("inv_cost", 0.0)
+        st.session_state.setdefault("inv_iva", 0.0)
+        st.session_state.setdefault("inv_price", 0.0)
+
         col1, col2, col3 = st.columns([1.2, 2.2, 1])
         with col1:
-            code = st.text_input("Código", key="inv_code")
+            # CAMBIO: on_change dispara la autocarga por código
+            code = st.text_input("Código", key="inv_code", on_change=_load_item_from_code)
         with col2:
             name = st.text_input("Nombre", key="inv_name")
         with col3:
-            qty = st.number_input("Unidades", min_value=0, step=1, value=0, key="inv_qty")
+            qty = st.number_input("Unidades", min_value=0, step=1, value=st.session_state.get("inv_qty", 0), key="inv_qty")
 
         col4, col5, col6 = st.columns(3)
         with col4:
             cost = st.number_input("Valor unitario (compra)", min_value=0.0, step=100.0, format="%.2f", key="inv_cost")
         with col5:
-            iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0, key="inv_iva")
+            iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=st.session_state.get("inv_iva", 0.0), key="inv_iva")
         with col6:
             price = st.number_input("precio de venta", min_value=0.0, step=100.0, format="%.2f", key="inv_price")
+
+        # Mensaje tras presionar Enter en "Código"
+        msg = st.session_state.get("inv_loaded_msg", "")
+        if msg:
+            if st.session_state.get("inv_loaded_ok", False):
+                st.success(msg)
+            else:
+                st.warning(msg)
 
         add_col, _ = st.columns([1, 3])
         with add_col:
@@ -846,8 +890,11 @@ def page_products() -> None:
                         {"code": code.strip(), "name": name.strip(), "qty": int(qty),
                          "unit_cost": float(cost), "iva": float(iva), "sale_price": float(price)}
                     )
-                    for k in ["inv_code", "inv_name", "inv_qty", "inv_cost", "inv_iva", "inv_price"]:
-                        if k in st.session_state: del st.session_state[k]
+                    # Limpiar campos del formulario para el siguiente ítem
+                    for k in ["inv_code", "inv_name", "inv_qty", "inv_cost", "inv_iva", "inv_price",
+                              "inv_loaded_ok", "inv_loaded_msg"]:
+                        if k in st.session_state:
+                            del st.session_state[k]
                     st.rerun()
 
     # Tabla temporal de ítems de la factura
