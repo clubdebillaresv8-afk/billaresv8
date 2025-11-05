@@ -7,492 +7,6 @@ clubdebillaresV8 – POS simple con:
 - Ventas + recibo PDF (una sola fila con totales)
 - Reposición (inventario)
 - Inventario a fecha
-Compatible con SQLite (local) y PostgreSQL (Render).
-"""
-
-from __future__ import annotations
-import os, sqlite3, hashlib, secrets, datetime as dt
-from io import BytesIO
-from typing import List, Optional, Tuple
-
-import streamlit as st
-
-try:
-    import psycopg2
-    import psycopg2.extras
-except ImportError:
-    psycopg2 = None
-
-# =============================================================================
-# CONFIGURACIÓN
-# =============================================================================
-APP_TITLE = "clubdebillaresV8"
-DB_PATH = os.path.join(os.path.dirname(__file__), "data_pos.db")
-CURRENCY = ""
-BUSINESS_NAME = ""
-PBKDF2_ITERATIONS = 260_000
-RESTOCK_STEP = 100.0
-
-FIXED_USER = "condeomar"
-FIXED_PASS = "122130@"
-
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.markdown("""
-<style>
-#MainMenu, footer, header {visibility:hidden;}
-.small-note{font-size:.9rem;opacity:.7}
-:root {--azul:#2563eb;--azul-hover:#1d4ed8;}
-section[data-testid="stSidebar"] button{
- background:var(--azul)!important;color:white!important;border:none!important}
-section[data-testid="stSidebar"] button:hover{
- background:var(--azul-hover)!important}
-</style>
-""", unsafe_allow_html=True)
-
-# =============================================================================
-# UTILIDADES / CONEXIÓN HÍBRIDA
-# =============================================================================
-def money_dot_thousands(v: float) -> str:
-    try:
-        return f"{int(round(v)):,.0f}".replace(",", ".")
-    except Exception:
-        return "0"
-
-def use_postgres() -> bool:
-    return bool(os.environ.get("DATABASE_URL")) and psycopg2 is not None
-
-def get_conn():
-    """Devuelve conexión SQLite o PostgreSQL según entorno"""
-    if use_postgres():
-        url = os.environ["DATABASE_URL"]
-        conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.DictCursor)
-        return conn
-    else:
-        conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-def show_msg(ok: bool, msg: str):
-    (st.success if ok else st.error)(str(msg))
-
-def reportlab_ok():
-    try:
-        import reportlab
-        return True
-    except Exception:
-        return False
-
-# =============================================================================
-# CREACIÓN BASE DE DATOS
-# =============================================================================
-def init_db():
-    """Inicializa las tablas básicas."""
-    if use_postgres():
-        conn = get_conn(); cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE,
-            password_hash TEXT, password_salt TEXT,
-            iterations INTEGER DEFAULT 260000,
-            is_admin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS products(
-            id SERIAL PRIMARY KEY,
-            code TEXT UNIQUE, name TEXT,
-            price REAL DEFAULT 0, cost REAL DEFAULT 0,
-            iva REAL DEFAULT 0, stock INTEGER DEFAULT 0,
-            company TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS sales(
-            id SERIAL PRIMARY KEY,
-            product_id INTEGER REFERENCES products(id),
-            qty INTEGER, total REAL,
-            sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS invoices(
-            id SERIAL PRIMARY KEY,
-            product_id INTEGER REFERENCES products(id),
-            qty INTEGER, invoice_total REAL,
-            unit_cost REAL, new_price REAL,
-            created_by TEXT, batch_id TEXT, company TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        """)
-        conn.commit(); conn.close()
-    else:
-        with get_conn() as conn:
-            c = conn.cursor()
-            c.execute("""CREATE TABLE IF NOT EXISTS users(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE, password_hash TEXT,
-                password_salt TEXT, iterations INTEGER,
-                is_admin INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);""")
-            c.execute("""CREATE TABLE IF NOT EXISTS products(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT UNIQUE, name TEXT, price REAL, cost REAL,
-                iva REAL, stock INTEGER, company TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);""")
-            c.execute("""CREATE TABLE IF NOT EXISTS sales(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_id INTEGER, qty INTEGER, total REAL,
-                sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(product_id) REFERENCES products(id));""")
-            c.execute("""CREATE TABLE IF NOT EXISTS invoices(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_id INTEGER, qty INTEGER, invoice_total REAL,
-                unit_cost REAL, new_price REAL, created_by TEXT,
-                batch_id TEXT, company TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(product_id) REFERENCES products(id));""")
-            conn.commit()
-
-# =============================================================================
-# SEGURIDAD / HASH
-# =============================================================================
-def hash_password(password, salt_hex=None, iterations=PBKDF2_ITERATIONS):
-    if not salt_hex:
-        salt = secrets.token_bytes(16)
-        salt_hex = salt.hex()
-    else:
-        salt = bytes.fromhex(salt_hex)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
-    return dk.hex(), salt_hex, iterations
-
-def verify_password(password, stored_hash_hex, salt_hex, iterations):
-    h, _, _ = hash_password(password, salt_hex, iterations)
-    return secrets.compare_digest(h, stored_hash_hex)
-
-def create_user(username, password, is_admin=False):
-    username = username.strip().lower()
-    if not username or not password:
-        return False, "Usuario y contraseña requeridos."
-    h, s, it = hash_password(password)
-    try:
-        with get_conn() as conn:
-            cur = conn.cursor()
-            if use_postgres():
-                cur.execute("INSERT INTO users(username,password_hash,password_salt,iterations,is_admin) VALUES(%s,%s,%s,%s,%s)",
-                            (username, h, s, it, is_admin))
-            else:
-                cur.execute("INSERT INTO users(username,password_hash,password_salt,iterations,is_admin) VALUES(?,?,?,?,?)",
-                            (username, h, s, it, 1 if is_admin else 0))
-            conn.commit()
-        return True, f"Usuario {username} creado."
-    except Exception as e:
-        return False, str(e)
-
-def verify_user(username, password):
-    u = username.strip().lower()
-    if u == FIXED_USER and password == FIXED_PASS:
-        return True, {"username": u, "is_admin": True}
-    try:
-        conn = get_conn(); cur = conn.cursor()
-        if use_postgres():
-            cur.execute("SELECT * FROM users WHERE username=%s", (u,))
-        else:
-            cur.execute("SELECT * FROM users WHERE username=?", (u,))
-        row = cur.fetchone()
-        if not row: return False, {}
-        data = dict(row)
-        if verify_password(password, data["password_hash"], data["password_salt"], int(data["iterations"])):
-            return True, {"username": data["username"], "is_admin": bool(data["is_admin"])}
-        return False, {}
-    except Exception:
-        return False, {}
-# =============================================================================
-# CRUD – PRODUCTOS / FACTURAS / VENTAS
-# =============================================================================
-def get_product_by_code(code: str):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        if use_postgres():
-            cur.execute("SELECT * FROM products WHERE code=%s", (code,))
-        else:
-            cur.execute("SELECT * FROM products WHERE code=?", (code,))
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-def add_product(code, name, price, stock, cost, iva, company):
-    try:
-        with get_conn() as conn:
-            cur = conn.cursor()
-            if use_postgres():
-                cur.execute("""INSERT INTO products(code,name,price,stock,cost,iva,company)
-                               VALUES(%s,%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT (code) DO UPDATE SET
-                               name=EXCLUDED.name,price=EXCLUDED.price,
-                               stock=EXCLUDED.stock,cost=EXCLUDED.cost,iva=EXCLUDED.iva,company=EXCLUDED.company""",
-                            (code, name, price, stock, cost, iva, company))
-            else:
-                cur.execute("""INSERT OR REPLACE INTO products(code,name,price,stock,cost,iva,company)
-                               VALUES(?,?,?,?,?,?,?)""",
-                            (code, name, price, stock, cost, iva, company))
-            conn.commit()
-        return True, "Producto guardado."
-    except Exception as e:
-        return False, f"Error: {e}"
-
-def list_products_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        q = "SELECT * FROM products ORDER BY name ASC"
-        cur.execute(q)
-        return [dict(x) for x in cur.fetchall()]
-
-def insert_invoice(product_id, qty, total, unit_cost, new_price, created_by, batch_id, company):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        if use_postgres():
-            cur.execute("""INSERT INTO invoices(product_id,qty,invoice_total,unit_cost,new_price,created_by,batch_id,company)
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (product_id, qty, total, unit_cost, new_price, created_by, batch_id, company))
-        else:
-            cur.execute("""INSERT INTO invoices(product_id,qty,invoice_total,unit_cost,new_price,created_by,batch_id,company)
-                           VALUES(?,?,?,?,?,?,?,?)""",
-                        (product_id, qty, total, unit_cost, new_price, created_by, batch_id, company))
-        conn.commit()
-
-def delete_invoice_batch(batch_id: str, adjust_stock=True):
-    try:
-        with get_conn() as conn:
-            cur = conn.cursor()
-            if use_postgres():
-                cur.execute("SELECT product_id, qty FROM invoices WHERE batch_id=%s", (batch_id,))
-            else:
-                cur.execute("SELECT product_id, qty FROM invoices WHERE batch_id=?", (batch_id,))
-            rows = cur.fetchall()
-            if not rows:
-                return False, "Lote no encontrado."
-            if adjust_stock:
-                for r in rows:
-                    pid, q = int(r["product_id"]), int(r["qty"])
-                    if use_postgres():
-                        cur.execute("UPDATE products SET stock=GREATEST(stock - %s,0) WHERE id=%s", (q, pid))
-                    else:
-                        cur.execute("UPDATE products SET stock=max(stock - ?,0) WHERE id=?", (q, pid))
-            if use_postgres():
-                cur.execute("DELETE FROM invoices WHERE batch_id=%s", (batch_id,))
-            else:
-                cur.execute("DELETE FROM invoices WHERE batch_id=?", (batch_id,))
-            conn.commit()
-        return True, f"Lote {batch_id} eliminado."
-    except Exception as e:
-        return False, f"Error al borrar lote: {e}"
-
-def register_sale(product_id: int, qty: int):
-    if qty <= 0:
-        return False, "Cantidad inválida", 0.0
-    with get_conn() as conn:
-        cur = conn.cursor()
-        if use_postgres():
-            cur.execute("SELECT price,stock,name,cost FROM products WHERE id=%s", (product_id,))
-        else:
-            cur.execute("SELECT price,stock,name,cost FROM products WHERE id=?", (product_id,))
-        r = cur.fetchone()
-        if not r:
-            return False, "Producto no encontrado.", 0.0
-        price, stock = float(r["price"]), int(r["stock"])
-        if stock < qty:
-            return False, f"Stock insuficiente ({stock})", 0.0
-        total = round(price * qty, 2)
-        try:
-            if use_postgres():
-                cur.execute("UPDATE products SET stock=stock-%s WHERE id=%s", (qty, product_id))
-                cur.execute("INSERT INTO sales(product_id,qty,total) VALUES(%s,%s,%s)", (product_id, qty, total))
-            else:
-                cur.execute("UPDATE products SET stock=stock-? WHERE id=?", (qty, product_id))
-                cur.execute("INSERT INTO sales(product_id,qty,total) VALUES(?,?,?)", (product_id, qty, total))
-            conn.commit()
-            return True, f"Venta de {qty} x {r['name']} registrada.", total
-        except Exception as e:
-            conn.rollback()
-            return False, str(e), 0.0
-
-# =============================================================================
-# PDF
-# =============================================================================
-def build_company_invoice_pdf_with_sale(rows: List[dict], company: str, business_name: str = "", nit: str = ""):
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER
-    from reportlab.lib import colors
-
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("TitleStrong", parent=styles["Title"], fontName="Helvetica-Bold", alignment=TA_CENTER)
-    title = Paragraph(f"<b>{(business_name or 'Factura por empresa')}</b>", title_style)
-    subtitle = Paragraph(f"Empresa: <b>{company}</b> — Fecha: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"])
-    header = ["Código", "Unidades", "Nombre", "IVA", "Valor unitario", "Valor de venta", "Total"]
-    data = [header]
-    total_general = 0.0
-    for r in rows:
-        qty = int(r.get("qty", 0))
-        iva = float(r.get("iva", 0.0))
-        unit = float(r.get("unit_cost", 0.0))
-        sale = float(r.get("sale_price", 0.0))
-        total = qty * unit * (1 + iva/100)
-        total_general += total
-        data.append([r.get("code",""), qty, r.get("name",""), f"{iva:.2f}%", money_dot_thousands(unit),
-                     money_dot_thousands(sale), money_dot_thousands(total)])
-    data.append(["", "", "", "", "", "TOTAL", money_dot_thousands(total_general)])
-    table = Table(data, colWidths=[65, 60, 220, 60, 80, 80, 80])
-    table.setStyle(TableStyle([
-        ("GRID", (0,0), (-1,-1), 1.2, colors.black),
-        ("BACKGROUND",(0,0),(-1,0),colors.whitesmoke),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("ALIGN",(1,1),(-1,-1),"CENTER"),
-        ("ALIGN",(2,1),(2,-1),"LEFT"),
-        ("ALIGN",(4,1),(-1,-1),"RIGHT"),
-        ("SPAN",(0,-1),(5,-1)),
-        ("BACKGROUND",(0,-1),(-1,-1),colors.whitesmoke),
-        ("FONTNAME",(5,-1),(6,-1),"Helvetica-Bold")
-    ]))
-    doc.build([title, Spacer(1,6), subtitle, Spacer(1,8), table])
-    pdf = buf.getvalue(); buf.close()
-    return pdf, None
-
-# =============================================================================
-# FOOTER
-# =============================================================================
-def render_footer():
-    st.markdown("""
-    <style>.custom-footer{position:fixed;bottom:0;width:100%;text-align:center;
-    font-size:12px;color:#6b7280;}</style>
-    <div class="custom-footer">© 2025 Creado por Omar Conde</div>
-    """, unsafe_allow_html=True)
-# =============================================================================
-# INTERFAZ STREAMLIT
-# =============================================================================
-def ui_login():
-    st.title("🔐 Iniciar sesión")
-    with st.form("login_form"):
-        u = st.text_input("Usuario")
-        p = st.text_input("Contraseña", type="password")
-        if st.form_submit_button("Entrar"):
-            ok, data = verify_user(u, p)
-            if ok:
-                st.session_state["user"] = data
-                st.success(f"Bienvenido, {data['username']}")
-                st.rerun()
-            else:
-                st.error("Credenciales incorrectas")
-
-def ui_factura_compra():
-    st.header("📦 Ingreso de factura de compra por empresa")
-    company = st.text_input("Nombre de la empresa")
-    fecha_factura = st.date_input("Fecha de la factura", dt.date.today())
-    batch_id = f"{company}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}"
-    st.markdown("---")
-    code = st.text_input("Código del producto")
-    name = st.text_input("Nombre del producto")
-    qty = st.number_input("Cantidad", min_value=1, step=1)
-    unit_cost = st.number_input("Costo unitario", min_value=0.0)
-    sale_price = st.number_input("Valor de venta sugerido", min_value=0.0)
-    iva = st.number_input("IVA (%)", min_value=0.0, value=0.0)
-    btn_add = st.button("Agregar producto")
-
-    if "factura_items" not in st.session_state:
-        st.session_state.factura_items = []
-
-    if btn_add:
-        total = qty * unit_cost
-        add_product(code, name, sale_price, qty, unit_cost, iva, company)
-        product = get_product_by_code(code)
-        if product:
-            insert_invoice(product["id"], qty, total, unit_cost, sale_price,
-                           st.session_state["user"]["username"], batch_id, company)
-            st.session_state.factura_items.append({
-                "code": code, "name": name, "qty": qty, "iva": iva,
-                "unit_cost": unit_cost, "sale_price": sale_price
-            })
-            st.success(f"Producto {name} agregado a la factura.")
-    st.markdown("---")
-
-    if st.session_state.factura_items:
-        st.subheader("Detalle de factura actual")
-        st.table(st.session_state.factura_items)
-        if st.button("Generar PDF de esta factura"):
-            pdf, _ = build_company_invoice_pdf_with_sale(
-                st.session_state.factura_items, company)
-            st.download_button("Descargar factura PDF", pdf,
-                               f"Factura_{company}.pdf", "application/pdf")
-
-def ui_historial_facturas():
-    st.header("🧾 Historial de facturas de compra")
-    with get_conn() as conn:
-        cur = conn.cursor()
-        if use_postgres():
-            cur.execute("""SELECT DISTINCT batch_id, company, MIN(created_at) as fecha, COUNT(*) as productos
-                           FROM invoices GROUP BY batch_id, company ORDER BY fecha DESC""")
-        else:
-            cur.execute("""SELECT DISTINCT batch_id, company, MIN(created_at) as fecha, COUNT(*) as productos
-                           FROM invoices GROUP BY batch_id, company ORDER BY fecha DESC""")
-        rows = [dict(r) for r in cur.fetchall()]
-    st.dataframe(rows)
-    if rows:
-        sel = st.selectbox("Selecciona un lote", [r["batch_id"] for r in rows])
-        if st.button("Ver factura en PDF"):
-            with get_conn() as conn:
-                cur = conn.cursor()
-                if use_postgres():
-                    cur.execute("""SELECT p.code,p.name,i.qty,p.iva,i.unit_cost,i.new_price as sale_price
-                                   FROM invoices i JOIN products p ON i.product_id=p.id WHERE i.batch_id=%s""", (sel,))
-                else:
-                    cur.execute("""SELECT p.code,p.name,i.qty,p.iva,i.unit_cost,i.new_price as sale_price
-                                   FROM invoices i JOIN products p ON i.product_id=p.id WHERE i.batch_id=?""", (sel,))
-                rows2 = [dict(r) for r in cur.fetchall()]
-            if rows2:
-                pdf, _ = build_company_invoice_pdf_with_sale(rows2, rows[0]["company"])
-                st.download_button("Descargar PDF", pdf, f"{sel}.pdf", "application/pdf")
-
-def ui_inventario():
-    st.header("📋 Inventario actual")
-    data = list_products_db()
-    st.dataframe(data)
-    st.download_button("Descargar inventario CSV",
-                       "\n".join([",".join(map(str, x.values())) for x in data]),
-                       "inventario.csv", "text/csv")
-
-# =============================================================================
-# MAIN
-# =============================================================================
-def main():
-    init_db()
-    render_footer()
-
-    user = st.session_state.get("user")
-    if not user:
-        ui_login()
-        return
-
-    menu = st.sidebar.radio("Navegación", ["Factura de compra", "Historial", "Inventario", "Salir"])
-
-    if menu == "Factura de compra":
-        ui_factura_compra()
-    elif menu == "Historial":
-        ui_historial_facturas()
-    elif menu == "Inventario":
-        ui_inventario()
-    elif menu == "Salir":
-        st.session_state.clear()
-        st.rerun()
-
-if __name__ == "__main__":
-    main()
-"""
-clubdebillaresV8 – POS simple con:
-- Login y gestión de usuarios
-- Factura de compra por empresa (varios productos) + PDF con 'precio de venta'
-- Historial de facturas (persistente) con descarga de PDF por lote
-- Ventas + recibo PDF (una sola fila con totales)
-- Reposición (inventario)
-- Inventario a fecha
 
 Requisitos:
     pip install streamlit==1.38.0 reportlab
@@ -524,9 +38,6 @@ PBKDF2_ITERATIONS = 260_000
 # Usuario fijo opcional (para entrar sin crear usuario)
 FIXED_USER = "condeomar"
 FIXED_PASS = "122130@"
-
-# Paso para +/- en REPOSICIÓN
-RESTOCK_STEP = 100.0
 
 
 # =============================================================================
@@ -608,6 +119,10 @@ def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
 
 # ---- NUEVO: utilitario para dejar la base "en blanco" (conserva usuarios por defecto)
 def wipe_business_data(keep_users: bool = True) -> None:
+    """
+    Elimina datos de negocio: invoices, sales y products.
+    Si keep_users=False, también borra usuarios.
+    """
     with get_conn() as conn:
         conn.execute("DELETE FROM invoices;")
         conn.execute("DELETE FROM sales;")
@@ -618,10 +133,16 @@ def wipe_business_data(keep_users: bool = True) -> None:
 
 # ---- NUEVO: eliminar un lote de facturas (opción para revertir stock)
 def delete_invoice_batch(batch_id: str, adjust_stock: bool = True) -> Tuple[bool, str]:
+    """
+    Borra todas las líneas de 'invoices' de un batch_id.
+    Si adjust_stock=True, resta del stock de cada producto la cantidad del lote.
+    """
     if not batch_id:
         return False, "Batch ID inválido."
+
     try:
         with get_conn() as conn:
+            # Cargar líneas del lote
             lines = conn.execute(
                 "SELECT product_id, qty FROM invoices WHERE batch_id=?",
                 (batch_id,),
@@ -1122,23 +643,15 @@ def build_company_invoice_pdf_with_sale(
     """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib import colors
-    import datetime as dt
 
     buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=letter,
-        leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28
-    )
+    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("TitleStrong", parent=styles["Title"], fontName="Helvetica-Bold", alignment=TA_CENTER)
 
-    title = Paragraph(
-        f"<b>{(business_name or 'Factura por empresa')}{(' – NIT ' + nit) if nit else ''}</b>",
-        title_style
-    )
+    titulo = f"<b>{business_name} – NIT {nit}</b>" if (business_name or nit) else "<b>Factura por empresa</b>"
+    title = Paragraph(titulo, styles["Title"])
     subtitle = Paragraph(
         f"Empresa: <b>{company}</b> — Fecha/Hora: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         styles["Normal"]
@@ -1171,23 +684,21 @@ def build_company_invoice_pdf_with_sale(
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
+                ("GRID", (0, 0), (-1, -1), 0.8, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 11),
                 ("ALIGN", (0, 1), (1, -2), "CENTER"),
                 ("ALIGN", (2, 1), (2, -2), "LEFT"),
                 ("ALIGN", (3, 1), (3, -2), "CENTER"),
                 ("ALIGN", (4, 1), (6, -2), "RIGHT"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 1), (-1, -2), 3),
-                ("BOTTOMPADDING", (0, 1), (-1, -2), 3),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
                 ("SPAN", (0, -1), (5, -1)),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
-                ("FONTNAME", (5, -1), (6, -1), "Helvetica-Bold"),
+                ("FONTNAME", (6, -1), (6, -1), "Helvetica-Bold"),
                 ("ALIGN", (6, -1), (6, -1), "RIGHT"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
             ]
         )
     )
@@ -1216,30 +727,6 @@ def render_footer() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-# =============================================================================
-# AUTOCARGA (EN FACTURA) AL ESCRIBIR CÓDIGO
-# =============================================================================
-def _load_item_from_code():
-    code = (st.session_state.get("inv_code") or "").strip()
-    if not code:
-        st.session_state["inv_loaded_ok"] = False
-        st.session_state["inv_loaded_msg"] = ""
-        return
-    row = get_product_by_code(code)
-    if row:
-        st.session_state["inv_name"]  = row["name"] or ""
-        st.session_state["inv_iva"]   = float(row["iva"] or 0.0)
-        st.session_state["inv_cost"]  = float(row["cost"] or 0.0)
-        st.session_state["inv_price"] = float(row["price"] or 0.0)
-        if not (st.session_state.get("cur_company") or "").strip():
-            st.session_state["cur_company"] = row["company"] or ""
-        st.session_state["inv_loaded_ok"]  = True
-        st.session_state["inv_loaded_msg"] = f"Producto cargado: [{row['code']}] {row['name']}. Puedes editarlo y agregar."
-    else:
-        st.session_state["inv_loaded_ok"]  = False
-        st.session_state["inv_loaded_msg"] = "No existe un producto con ese código."
 
 
 # =============================================================================
@@ -1310,36 +797,21 @@ def page_products() -> None:
         st.session_state["cur_nit"] = st.text_input("NIT", value=st.session_state["cur_nit"])
 
     with st.expander("Agregar ítem a la factura de compra", expanded=True):
-        # estados de los inputs (default en cero)
-        st.session_state.setdefault("inv_code", "")
-        st.session_state.setdefault("inv_name", "")
-        st.session_state.setdefault("inv_qty", 0)
-        st.session_state.setdefault("inv_cost", 0.0)
-        st.session_state.setdefault("inv_iva", 0.0)
-        st.session_state.setdefault("inv_price", 0.0)
-
         col1, col2, col3 = st.columns([1.2, 2.2, 1])
         with col1:
-            code = st.text_input("Código", key="inv_code", on_change=_load_item_from_code)
+            code = st.text_input("Código", key="inv_code")
         with col2:
             name = st.text_input("Nombre", key="inv_name")
         with col3:
-            qty = st.number_input("Unidades", min_value=0, step=1, value=st.session_state.get("inv_qty", 0), key="inv_qty")
+            qty = st.number_input("Unidades", min_value=0, step=1, value=0, key="inv_qty")
 
-        STEP = 100.0
-        col4, col5, col6 = st.columns([1.1, 1.1, 1.1])
+        col4, col5, col6 = st.columns(3)
         with col4:
-            st.number_input("Valor unitario (compra)", min_value=0.0, step=STEP, format="%.2f", key="inv_cost")
+            cost = st.number_input("Valor unitario (compra)", min_value=0.0, step=100.0, format="%.2f", key="inv_cost")
         with col5:
-            st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0,
-                            value=st.session_state.get("inv_iva", 0.0), key="inv_iva")
+            iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0, key="inv_iva")
         with col6:
-            st.number_input("precio de venta", min_value=0.0, step=STEP, format="%.2f", key="inv_price")
-
-        # mensaje de autocarga por código (si aplica)
-        msg = st.session_state.get("inv_loaded_msg", "")
-        if msg:
-            (st.success if st.session_state.get("inv_loaded_ok", False) else st.warning)(msg)
+            price = st.number_input("precio de venta", min_value=0.0, step=100.0, format="%.2f", key="inv_price")
 
         add_col, _ = st.columns([1, 3])
         with add_col:
@@ -1349,14 +821,10 @@ def page_products() -> None:
                 else:
                     st.session_state["cur_items"].append(
                         {"code": code.strip(), "name": name.strip(), "qty": int(qty),
-                         "unit_cost": float(st.session_state.get("inv_cost", 0.0)),
-                         "iva": float(st.session_state.get("inv_iva", 0.0)),
-                         "sale_price": float(st.session_state.get("inv_price", 0.0))}
+                         "unit_cost": float(cost), "iva": float(iva), "sale_price": float(price)}
                     )
-                    # limpiar inputs
-                    for k in ["inv_code", "inv_name", "inv_qty", "inv_cost", "inv_iva", "inv_price",
-                              "inv_loaded_ok", "inv_loaded_msg"]:
-                        st.session_state.pop(k, None)
+                    for k in ["inv_code", "inv_name", "inv_qty", "inv_cost", "inv_iva", "inv_price"]:
+                        if k in st.session_state: del st.session_state[k]
                     st.rerun()
 
     # Tabla temporal de ítems de la factura
@@ -1376,7 +844,6 @@ def page_products() -> None:
             hide_index=True, use_container_width=True
         )
 
-    # Guardar/cancelar factura
     cbtn1, cbtn2 = st.columns([1.2, 1])
     with cbtn1:
         if st.button("Guardar factura y generar PDF", type="primary", use_container_width=True, disabled=not items):
@@ -1401,7 +868,7 @@ def page_products() -> None:
                         )
                         product_id = int(existing["id"])
                     else:
-                        add_product(
+                        ok, _ = add_product(
                             it["code"], it["name"],
                             float(it["sale_price"]),
                             0,
@@ -1643,14 +1110,6 @@ def page_restock() -> None:
     names = [f"[{p['code'] or p['id']}] {p['name']}" for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
 
-    # Reinicia SIEMPRE costo y precio a 0 cuando cambie el producto
-    cur_id = products[idx]["id"]
-    if st.session_state.get("restock_current_id") != cur_id:
-        st.session_state["restock_current_id"] = cur_id
-        st.session_state["restock_cost"] = 0.0
-        st.session_state["restock_price"] = 0.0
-
-    # Borrar producto seleccionado
     col_del_sel, _ = st.columns([1, 3])
     with col_del_sel:
         if st.button("Borrar producto seleccionado", use_container_width=True, key="restock_delete_selected"):
@@ -1659,36 +1118,23 @@ def page_restock() -> None:
             if ok:
                 st.rerun()
 
-    # ====== (1) Cantidad en CERO por defecto ======
-    st.session_state.setdefault("restock_qty", 0)  # ← ahora inicia en 0
-    qty = st.number_input("Cantidad a agregar", min_value=0, step=1, key="restock_qty")
+    st.session_state.setdefault("restock_qty", 1)
+    qty = st.number_input("Cantidad a agregar", min_value=1, step=1, key="restock_qty")
 
-    # === SOLO los inputs (sin botones extra ni checkbox) ===
-    st.markdown("### Precio y costo del producto seleccionado")
-    c1, c2 = st.columns([1.1, 1.1])
-    with c1:
-        st.number_input("Valor unitario (compra)", min_value=0.0, step=RESTOCK_STEP, format="%.2f",
-                        key="restock_cost")
-    with c2:
-        st.number_input("precio de venta", min_value=0.0, step=RESTOCK_STEP, format="%.2f",
-                        key="restock_price")
-
-    # Mensajes
     colA, colB = st.columns(2)
     with colA:
         st.info(f"Agregarás {int(qty)} unidades al inventario del producto seleccionado.")
     with colB:
-        st.info("Reposición: mueve inventario. No crea factura.")
+        st.info("Reposición: solo mueve inventario. No es una venta ni requiere datos de factura.")
 
-    # Acciones
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Reponer", use_container_width=True):
             ok, msg = restock_with_invoice(products[idx]["id"], int(qty), None, None)
             if ok:
-                st.success(msg)
-                # dejamos qty en 0 otra vez si quieres que quede "en cero" tras reponer
-                st.session_state["restock_qty"] = 0
+                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}")
+                for k in ["restock_qty"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
             else:
                 st.error(msg)
@@ -1718,30 +1164,6 @@ def page_restock() -> None:
                         st.rerun()
                     else:
                         st.error(msg)
-
-    # ====== (2) Inventario actual visible aquí mismo ======
-    st.divider()
-    st.markdown("### Inventario actual")
-    data = list_products_db()
-    if data:
-        st.dataframe(
-            [
-                {
-                    "Código": p["code"],
-                    "Nombre": p["name"],
-                    "Empresa": p["company"] or "",
-                    "Costo unit.": p["cost"],
-                    "Precio (venta)": p["price"],
-                    "IVA %": p["iva"],
-                    "Unidades": p["stock"],
-                }
-                for p in data
-            ],
-            hide_index=True,
-            use_container_width=True,
-        )
-    else:
-        st.info("Aún no hay productos.")
 
 
 def page_inventory() -> None:
