@@ -1155,7 +1155,7 @@ def page_restock() -> None:
                     if ok:
                         st.rerun()
         with coly2:
-            st.caption("Se crean con precio, costo, IVA y unidades = 0 (puedes ajustarlos al reponer).")
+            st.caption("")
 
     names = [f"[{p['code'] or p['id']}] {p['name']}" for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
