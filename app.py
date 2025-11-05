@@ -145,13 +145,16 @@ def delete_invoice_batch(batch_id: str, adjust_stock: bool = True) -> Tuple[bool
                 return False, "No se encontraron líneas para ese lote."
 
             if adjust_stock:
+                # Revertir stock por cada línea
                 for ln in lines:
-                    pid = int(ln["product_id"]); q = int(ln["qty"])
+                    pid = int(ln["product_id"])
+                    q = int(ln["qty"])
                     cur = conn.execute("SELECT stock FROM products WHERE id=?", (pid,)).fetchone()
                     if cur:
                         new_stock = max(int(cur["stock"] or 0) - q, 0)
                         conn.execute("UPDATE products SET stock=? WHERE id=?", (new_stock, pid))
 
+            # Borrar las líneas del lote
             conn.execute("DELETE FROM invoices WHERE batch_id=?", (batch_id,))
             conn.commit()
 
@@ -627,6 +630,10 @@ def build_sale_pdf_like_screenshot(
 def build_company_invoice_pdf_with_sale(
     *, rows: List[dict], company: str, business_name: str = "", nit: str = ""
 ):
+    """
+    PDF multi-ítem por empresa con columna Valor de venta.
+    rows: dicts con keys: code, qty, name, iva, unit_cost, sale_price
+    """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -651,20 +658,17 @@ def build_company_invoice_pdf_with_sale(
         styles["Normal"]
     )
 
-    # Cabeceras en bold
-    hdr = ["Código", "Unidades", "Nombre", "IVA", "Valor unitario", "Valor de venta", "Total"]
-    data = [hdr]
+    header = ["Código", "Unidades", "Nombre", "IVA", "Valor unitario", "Valor de venta", "Total"]
+    data = [header]
+    total_general = 0.0
 
-    total_general = 0
     for r in rows:
-        qty   = int(r.get("qty", 0))
-        iva   = float(r.get("iva", 0.0))
-        unit  = float(r.get("unit_cost", 0.0))
-        sale  = float(r.get("sale_price", 0.0))
-        total_row = int(round(qty * unit * (1.0 + iva/100.0)))
-        total_general += total_row
-
-        # Solo strings → sin saltos/leading extra
+        qty = int(r.get("qty", 0))
+        iva = float(r.get("iva", 0.0))
+        unit = float(r.get("unit_cost", 0.0))
+        sale = float(r.get("sale_price", 0.0))
+        total = qty * unit * (1.0 + iva/100.0)
+        total_general += total
         data.append([
             str(r.get("code", "")),
             f"{qty}",
@@ -672,47 +676,40 @@ def build_company_invoice_pdf_with_sale(
             f"{iva:.2f} %",
             money_dot_thousands(unit),
             money_dot_thousands(sale),
-            money_dot_thousands(total_row),
+            money_dot_thousands(total),
         ])
 
     data.append(["", "", "", "", "", "TOTAL", money_dot_thousands(total_general)])
 
-    # Anchos: más espacio para columnas numéricas para evitar cortes/espacios raros.
-    col_widths = [50, 50, 200, 54, 80, 80, 90]
-
-    table = Table(data, colWidths=col_widths, repeatRows=1)
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 11),
-
-        # Alineaciones consistentes en TODO el cuerpo
-        ("ALIGN", (0, 1), (1, -2), "CENTER"),  # Código, Unidades
-        ("ALIGN", (2, 1), (2, -2), "LEFT"),    # Nombre
-        ("ALIGN", (3, 1), (3, -2), "CENTER"),  # IVA
-        ("ALIGN", (4, 1), (6, -2), "RIGHT"),   # Números
-
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-
-        # Padding uniforme → nada de “desplazados”
-        ("TOPPADDING", (0, 1), (-1, -2), 3),
-        ("BOTTOMPADDING", (0, 1), (-1, -2), 3),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-
-        # Fila de TOTAL
-        ("SPAN", (0, -1), (5, -1)),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
-        ("FONTNAME", (5, -1), (6, -1), "Helvetica-Bold"),
-        ("ALIGN", (6, -1), (6, -1), "RIGHT"),
-    ]))
+    table = Table(data, colWidths=[65, 60, 230, 60, 85, 85, 85])
+    table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 11),
+                ("ALIGN", (0, 1), (1, -2), "CENTER"),
+                ("ALIGN", (2, 1), (2, -2), "LEFT"),
+                ("ALIGN", (3, 1), (3, -2), "CENTER"),
+                ("ALIGN", (4, 1), (6, -2), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 1), (-1, -2), 3),
+                ("BOTTOMPADDING", (0, 1), (-1, -2), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("SPAN", (0, -1), (5, -1)),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
+                ("FONTNAME", (5, -1), (6, -1), "Helvetica-Bold"),
+                ("ALIGN", (6, -1), (6, -1), "RIGHT"),
+            ]
+        )
+    )
 
     doc.build([title, Spacer(1, 6), subtitle, Spacer(1, 8), table])
     pdf = buf.getvalue()
     buf.close()
     return pdf, None
-
 
 
 # =============================================================================
@@ -760,7 +757,7 @@ def _load_item_from_code():
 
 
 # =============================================================================
-# PÁGINAS
+# PÁGINAS (VIEWS)
 # =============================================================================
 def login_screen() -> None:
     st.title(APP_TITLE)
@@ -1061,7 +1058,7 @@ def page_products() -> None:
                     key=f"dl_hist_{r['batch_id']}",
                 )
 
-            # ---- Borrar lote (con confirmación y opción de revertir stock)
+            # ---- NUEVO: borrar lote (con confirmación y opción de revertir stock)
             del_col1, del_col2, del_col3 = st.columns([1.2, 1, 1.8])
             with del_col1:
                 revert = st.checkbox("Revertir stock", value=True, key=f"rev_{r['batch_id']}")
@@ -1102,6 +1099,7 @@ def page_products() -> None:
         )
     else:
         st.info("Aún no hay productos.")
+    # (El bloque de borrar producto por nombre está en Reponer)
 
 
 def page_restock() -> None:
@@ -1118,7 +1116,6 @@ def page_restock() -> None:
                 st.rerun()
         return
 
-    # --- Autocargar y crear
     with st.expander("Crear o cargar producto por código/nombre", expanded=True):
         colx1, colx2, colx3 = st.columns([2, 2, 1])
         with colx1:
@@ -1155,7 +1152,7 @@ def page_restock() -> None:
                     if ok:
                         st.rerun()
         with coly2:
-            st.caption("")
+            st.caption("Se crean con precio, costo, IVA y unidades = 0 (puedes ajustarlos al reponer).")
 
     names = [f"[{p['code'] or p['id']}] {p['name']}" for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
@@ -1176,9 +1173,9 @@ def page_restock() -> None:
             if ok:
                 st.rerun()
 
-    # Cantidad
-    st.session_state.setdefault("restock_qty", 1)
-    qty = st.number_input("Cantidad a agregar", min_value=1, step=1, key="restock_qty")
+    # ====== (1) Cantidad en CERO por defecto ======
+    st.session_state.setdefault("restock_qty", 0)  # ← ahora inicia en 0
+    qty = st.number_input("Cantidad a agregar", min_value=0, step=1, key="restock_qty")
 
     # === SOLO los inputs (sin botones extra ni checkbox) ===
     st.markdown("### Precio y costo del producto seleccionado")
@@ -1204,14 +1201,13 @@ def page_restock() -> None:
             ok, msg = restock_with_invoice(products[idx]["id"], int(qty), None, None)
             if ok:
                 st.success(msg)
-                for k in ["restock_qty"]:
-                    st.session_state.pop(k, None)
+                # dejamos qty en 0 otra vez si quieres que quede "en cero" tras reponer
+                st.session_state["restock_qty"] = 0
                 st.rerun()
             else:
                 st.error(msg)
 
     with col2:
-        # ÚNICO expander de eliminación, sin keys personalizados (evita DuplicateWidgetID)
         with st.expander("Eliminar producto por nombre (acción irreversible)"):
             rows_del = list_products_db()
             if not rows_del:
@@ -1224,16 +1220,42 @@ def page_restock() -> None:
                 idx_del = st.selectbox(
                     "Producto a eliminar",
                     options=list(range(len(rows_del))),
-                    format_func=lambda i: etiquetas[i]
+                    format_func=lambda i: etiquetas[i],
+                    key="delete_idx_restock"
                 )
-                confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.")
-                if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not confirm):
+                confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.", key="delete_confirm_restock")
+
+                if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not confirm, key="delete_btn_restock"):
                     ok, msg = delete_product(int(rows_del[idx_del]["id"]))
                     if ok:
                         st.success(msg)
                         st.rerun()
                     else:
                         st.error(msg)
+
+    # ====== (2) Inventario actual visible aquí mismo ======
+    st.divider()
+    st.markdown("### Inventario actual")
+    data = list_products_db()
+    if data:
+        st.dataframe(
+            [
+                {
+                    "Código": p["code"],
+                    "Nombre": p["name"],
+                    "Empresa": p["company"] or "",
+                    "Costo unit.": p["cost"],
+                    "Precio (venta)": p["price"],
+                    "IVA %": p["iva"],
+                    "Unidades": p["stock"],
+                }
+                for p in data
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("Aún no hay productos.")
 
 
 def page_inventory() -> None:
