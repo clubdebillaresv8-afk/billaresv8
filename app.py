@@ -485,7 +485,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-integralo pormi y melo imprimes # -*- coding: utf-8 -*-
 """
 clubdebillaresV8 – POS simple con:
 - Login y gestión de usuarios
