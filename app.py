@@ -39,6 +39,9 @@ PBKDF2_ITERATIONS = 260_000
 FIXED_USER = "condeomar"
 FIXED_PASS = "122130@"
 
+# Paso para +/- en REPOSICIÓN
+RESTOCK_STEP = 100.0
+
 
 # =============================================================================
 # ESTILOS / LAYOUT
@@ -119,10 +122,6 @@ def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
 
 # ---- NUEVO: utilitario para dejar la base "en blanco" (conserva usuarios por defecto)
 def wipe_business_data(keep_users: bool = True) -> None:
-    """
-    Elimina datos de negocio: invoices, sales y products.
-    Si keep_users=False, también borra usuarios.
-    """
     with get_conn() as conn:
         conn.execute("DELETE FROM invoices;")
         conn.execute("DELETE FROM sales;")
@@ -133,16 +132,10 @@ def wipe_business_data(keep_users: bool = True) -> None:
 
 # ---- NUEVO: eliminar un lote de facturas (opción para revertir stock)
 def delete_invoice_batch(batch_id: str, adjust_stock: bool = True) -> Tuple[bool, str]:
-    """
-    Borra todas las líneas de 'invoices' de un batch_id.
-    Si adjust_stock=True, resta del stock de cada producto la cantidad del lote.
-    """
     if not batch_id:
         return False, "Batch ID inválido."
-
     try:
         with get_conn() as conn:
-            # Cargar líneas del lote
             lines = conn.execute(
                 "SELECT product_id, qty FROM invoices WHERE batch_id=?",
                 (batch_id,),
@@ -152,16 +145,13 @@ def delete_invoice_batch(batch_id: str, adjust_stock: bool = True) -> Tuple[bool
                 return False, "No se encontraron líneas para ese lote."
 
             if adjust_stock:
-                # Revertir stock por cada línea
                 for ln in lines:
-                    pid = int(ln["product_id"])
-                    q = int(ln["qty"])
+                    pid = int(ln["product_id"]); q = int(ln["qty"])
                     cur = conn.execute("SELECT stock FROM products WHERE id=?", (pid,)).fetchone()
                     if cur:
                         new_stock = max(int(cur["stock"] or 0) - q, 0)
                         conn.execute("UPDATE products SET stock=? WHERE id=?", (new_stock, pid))
 
-            # Borrar las líneas del lote
             conn.execute("DELETE FROM invoices WHERE batch_id=?", (batch_id,))
             conn.commit()
 
@@ -637,10 +627,6 @@ def build_sale_pdf_like_screenshot(
 def build_company_invoice_pdf_with_sale(
     *, rows: List[dict], company: str, business_name: str = "", nit: str = ""
 ):
-    """
-    PDF multi-ítem por empresa con columnas numéricas sólidas y alineadas.
-    Evitamos Paragraph en celdas de datos para que no haya diferencias de leading/padding.
-    """
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -728,6 +714,7 @@ def build_company_invoice_pdf_with_sale(
     return pdf, None
 
 
+
 # =============================================================================
 # PIE DE PÁGINA
 # =============================================================================
@@ -749,27 +736,20 @@ def render_footer() -> None:
 
 
 # =============================================================================
-# AUTOCARGA POR CÓDIGO (NUEVO)
+# AUTOCARGA (EN FACTURA) AL ESCRIBIR CÓDIGO
 # =============================================================================
 def _load_item_from_code():
-    """
-    Si el código existe, carga en el formulario el nombre, IVA, costo y precio
-    para que el usuario lo edite y lo agregue a la factura.
-    Se ejecuta con on_change del input 'Código'.
-    """
     code = (st.session_state.get("inv_code") or "").strip()
     if not code:
         st.session_state["inv_loaded_ok"] = False
         st.session_state["inv_loaded_msg"] = ""
         return
-
     row = get_product_by_code(code)
     if row:
         st.session_state["inv_name"]  = row["name"] or ""
         st.session_state["inv_iva"]   = float(row["iva"] or 0.0)
         st.session_state["inv_cost"]  = float(row["cost"] or 0.0)
         st.session_state["inv_price"] = float(row["price"] or 0.0)
-        # Si la empresa arriba está vacía, usar la del producto
         if not (st.session_state.get("cur_company") or "").strip():
             st.session_state["cur_company"] = row["company"] or ""
         st.session_state["inv_loaded_ok"]  = True
@@ -780,7 +760,7 @@ def _load_item_from_code():
 
 
 # =============================================================================
-# PÁGINAS (VIEWS)
+# PÁGINAS
 # =============================================================================
 def login_screen() -> None:
     st.title(APP_TITLE)
@@ -847,7 +827,7 @@ def page_products() -> None:
         st.session_state["cur_nit"] = st.text_input("NIT", value=st.session_state["cur_nit"])
 
     with st.expander("Agregar ítem a la factura de compra", expanded=True):
-        # Defaults para evitar KeyError al autocompletar
+        # estados de los inputs (default en cero)
         st.session_state.setdefault("inv_code", "")
         st.session_state.setdefault("inv_name", "")
         st.session_state.setdefault("inv_qty", 0)
@@ -857,28 +837,26 @@ def page_products() -> None:
 
         col1, col2, col3 = st.columns([1.2, 2.2, 1])
         with col1:
-            # CAMBIO: on_change dispara la autocarga por código
             code = st.text_input("Código", key="inv_code", on_change=_load_item_from_code)
         with col2:
             name = st.text_input("Nombre", key="inv_name")
         with col3:
             qty = st.number_input("Unidades", min_value=0, step=1, value=st.session_state.get("inv_qty", 0), key="inv_qty")
 
-        col4, col5, col6 = st.columns(3)
+        STEP = 100.0
+        col4, col5, col6 = st.columns([1.1, 1.1, 1.1])
         with col4:
-            cost = st.number_input("Valor unitario (compra)", min_value=0.0, step=100.0, format="%.2f", key="inv_cost")
+            st.number_input("Valor unitario (compra)", min_value=0.0, step=STEP, format="%.2f", key="inv_cost")
         with col5:
-            iva = st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0, value=st.session_state.get("inv_iva", 0.0), key="inv_iva")
+            st.number_input("IVA %", min_value=0.0, max_value=100.0, step=1.0,
+                            value=st.session_state.get("inv_iva", 0.0), key="inv_iva")
         with col6:
-            price = st.number_input("precio de venta", min_value=0.0, step=100.0, format="%.2f", key="inv_price")
+            st.number_input("precio de venta", min_value=0.0, step=STEP, format="%.2f", key="inv_price")
 
-        # Mensaje tras presionar Enter en "Código"
+        # mensaje de autocarga por código (si aplica)
         msg = st.session_state.get("inv_loaded_msg", "")
         if msg:
-            if st.session_state.get("inv_loaded_ok", False):
-                st.success(msg)
-            else:
-                st.warning(msg)
+            (st.success if st.session_state.get("inv_loaded_ok", False) else st.warning)(msg)
 
         add_col, _ = st.columns([1, 3])
         with add_col:
@@ -888,13 +866,14 @@ def page_products() -> None:
                 else:
                     st.session_state["cur_items"].append(
                         {"code": code.strip(), "name": name.strip(), "qty": int(qty),
-                         "unit_cost": float(cost), "iva": float(iva), "sale_price": float(price)}
+                         "unit_cost": float(st.session_state.get("inv_cost", 0.0)),
+                         "iva": float(st.session_state.get("inv_iva", 0.0)),
+                         "sale_price": float(st.session_state.get("inv_price", 0.0))}
                     )
-                    # Limpiar campos del formulario para el siguiente ítem
+                    # limpiar inputs
                     for k in ["inv_code", "inv_name", "inv_qty", "inv_cost", "inv_iva", "inv_price",
                               "inv_loaded_ok", "inv_loaded_msg"]:
-                        if k in st.session_state:
-                            del st.session_state[k]
+                        st.session_state.pop(k, None)
                     st.rerun()
 
     # Tabla temporal de ítems de la factura
@@ -914,6 +893,7 @@ def page_products() -> None:
             hide_index=True, use_container_width=True
         )
 
+    # Guardar/cancelar factura
     cbtn1, cbtn2 = st.columns([1.2, 1])
     with cbtn1:
         if st.button("Guardar factura y generar PDF", type="primary", use_container_width=True, disabled=not items):
@@ -938,7 +918,7 @@ def page_products() -> None:
                         )
                         product_id = int(existing["id"])
                     else:
-                        ok, _ = add_product(
+                        add_product(
                             it["code"], it["name"],
                             float(it["sale_price"]),
                             0,
@@ -1122,7 +1102,6 @@ def page_products() -> None:
         )
     else:
         st.info("Aún no hay productos.")
-    # (El bloque de borrar producto por nombre está en Reponer)
 
 
 def page_restock() -> None:
@@ -1139,6 +1118,7 @@ def page_restock() -> None:
                 st.rerun()
         return
 
+    # --- Autocargar y crear
     with st.expander("Crear o cargar producto por código/nombre", expanded=True):
         colx1, colx2, colx3 = st.columns([2, 2, 1])
         with colx1:
@@ -1180,6 +1160,14 @@ def page_restock() -> None:
     names = [f"[{p['code'] or p['id']}] {p['name']}" for p in products]
     idx = st.selectbox("Producto", options=list(range(len(products))), format_func=lambda i: names[i], key="restock_idx")
 
+    # Reinicia SIEMPRE costo y precio a 0 cuando cambie el producto
+    cur_id = products[idx]["id"]
+    if st.session_state.get("restock_current_id") != cur_id:
+        st.session_state["restock_current_id"] = cur_id
+        st.session_state["restock_cost"] = 0.0
+        st.session_state["restock_price"] = 0.0
+
+    # Borrar producto seleccionado
     col_del_sel, _ = st.columns([1, 3])
     with col_del_sel:
         if st.button("Borrar producto seleccionado", use_container_width=True, key="restock_delete_selected"):
@@ -1188,21 +1176,34 @@ def page_restock() -> None:
             if ok:
                 st.rerun()
 
+    # Cantidad
     st.session_state.setdefault("restock_qty", 1)
     qty = st.number_input("Cantidad a agregar", min_value=1, step=1, key="restock_qty")
 
+    # === SOLO los inputs (sin botones extra ni checkbox) ===
+    st.markdown("### Precio y costo del producto seleccionado")
+    c1, c2 = st.columns([1.1, 1.1])
+    with c1:
+        st.number_input("Valor unitario (compra)", min_value=0.0, step=RESTOCK_STEP, format="%.2f",
+                        key="restock_cost")
+    with c2:
+        st.number_input("precio de venta", min_value=0.0, step=RESTOCK_STEP, format="%.2f",
+                        key="restock_price")
+
+    # Mensajes
     colA, colB = st.columns(2)
     with colA:
         st.info(f"Agregarás {int(qty)} unidades al inventario del producto seleccionado.")
     with colB:
-        st.info("Reposición: solo mueve inventario. No es una venta ni requiere datos de factura.")
+        st.info("Reposición: mueve inventario. No crea factura.")
 
+    # Acciones
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Reponer", use_container_width=True):
             ok, msg = restock_with_invoice(products[idx]["id"], int(qty), None, None)
             if ok:
-                st.success(f"Reposición guardada para {products[idx]['name']} — Cantidad: {int(qty)}")
+                st.success(msg)
                 for k in ["restock_qty"]:
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -1210,6 +1211,7 @@ def page_restock() -> None:
                 st.error(msg)
 
     with col2:
+        # ÚNICO expander de eliminación, sin keys personalizados (evita DuplicateWidgetID)
         with st.expander("Eliminar producto por nombre (acción irreversible)"):
             rows_del = list_products_db()
             if not rows_del:
@@ -1222,12 +1224,10 @@ def page_restock() -> None:
                 idx_del = st.selectbox(
                     "Producto a eliminar",
                     options=list(range(len(rows_del))),
-                    format_func=lambda i: etiquetas[i],
-                    key="delete_idx_restock"
+                    format_func=lambda i: etiquetas[i]
                 )
-                confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.", key="delete_confirm_restock")
-
-                if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not confirm, key="delete_btn_restock"):
+                confirm = st.checkbox("Entiendo los riesgos y deseo eliminarlo.")
+                if st.button("Eliminar producto", type="primary", use_container_width=True, disabled=not confirm):
                     ok, msg = delete_product(int(rows_del[idx_del]["id"]))
                     if ok:
                         st.success(msg)
